@@ -1,0 +1,10 @@
+__pycache__
+External
+build
+fmatmul.egg-info
+matsrc
+*.egg-info
+*.png
+colmap_garden
+*.so
+.vscode
