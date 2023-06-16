@@ -359,7 +359,6 @@ void gather_gaussians(
         max_points_for_tile,
         gaussian_list_size
     );
-
 }
 
 template<uint32_t SMSIZE>
@@ -470,7 +469,7 @@ __global__ void draw_backward_kernel(
             global_idx = i_loadings*SMSIZE + i;
 
             // check bound and early stop
-            if(global_idx>=(end_idx-start_idx)||accum < 0.01){
+            if(global_idx>=(end_idx-start_idx)||accum < 0.0001){
                 break;
             }
             _a = _gaussian_cov[i*4+0];
@@ -666,7 +665,7 @@ __global__ void draw_kernel(
             global_idx = i_loadings*SMSIZE + i;
 
             // check bound and early stop
-            if(global_idx>=(end_idx-start_idx)||accum < 0.01){
+            if(global_idx>=(end_idx-start_idx)||accum < 0.0001){
                 break;
             }
             _a = _gaussian_cov[i*4+0];

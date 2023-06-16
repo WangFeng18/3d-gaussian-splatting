@@ -78,7 +78,7 @@ class _trunc_exp(torch.autograd.Function):
     @staticmethod
     def backward(ctx, g):
         x = ctx.saved_tensors[0]
-        return g * torch.exp(x.clamp(-3, 1))
+        return g * torch.exp(x.clamp(-1, 1))
 
 trunc_exp = _trunc_exp.apply
 
