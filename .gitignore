@@ -8,3 +8,5 @@ matsrc
 colmap_garden
 *.so
 .vscode
+*.pth
+*.pt
