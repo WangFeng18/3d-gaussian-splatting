@@ -67,9 +67,9 @@ __global__ void world2camera_kernel(const float * pos, const float * rot, const 
     }
 
     res += tid * 3;
-    res[0] = pos[0] * _rot[0] + pos[1] * _rot[3] + pos[2] * _rot[6] + _trans[0];
-    res[1] = pos[0] * _rot[1] + pos[1] * _rot[4] + pos[2] * _rot[7] + _trans[1];
-    res[2] = pos[0] * _rot[2] + pos[1] * _rot[5] + pos[2] * _rot[8] + _trans[2];
+    res[0] = pos[0] * _rot[0] + pos[1] * _rot[1] + pos[2] * _rot[2] + _trans[0];
+    res[1] = pos[0] * _rot[3] + pos[1] * _rot[4] + pos[2] * _rot[5] + _trans[1];
+    res[2] = pos[0] * _rot[6] + pos[1] * _rot[7] + pos[2] * _rot[8] + _trans[2];
 }
 
 void world2camera(torch::Tensor pos, torch::Tensor rot, torch::Tensor trans, torch::Tensor res){
@@ -77,6 +77,29 @@ void world2camera(torch::Tensor pos, torch::Tensor rot, torch::Tensor trans, tor
     uint32_t gridsize = DIV_ROUND_UP(B, 1024);
     world2camera_kernel<<<gridsize, 1024>>>(pos.data_ptr<float>(), rot.data_ptr<float>(), trans.data_ptr<float>(), res.data_ptr<float>(), B);
 
+}
+
+__global__ void world2camera_backward_kernel(const float * grad_out, const float * rot, float * grad_inp, uint32_t B){
+    uint32_t tid = blockDim.x * blockIdx.x + threadIdx.x;
+    if(tid >= B) return;
+    grad_out += tid * 3;
+    float _rot[9];
+
+    #pragma unroll
+    for(int i=0;i<9;++i){
+        _rot[i] = rot[i];
+    }
+
+    grad_inp += tid * 3;
+    grad_inp[0] = grad_out[0] * _rot[0] + grad_out[1] * _rot[3] + grad_out[2] * _rot[6];
+    grad_inp[1] = grad_out[0] * _rot[1] + grad_out[1] * _rot[4] + grad_out[2] * _rot[7];
+    grad_inp[2] = grad_out[0] * _rot[2] + grad_out[1] * _rot[5] + grad_out[2] * _rot[8];
+}
+
+void world2camera_backward(torch::Tensor grad_out, torch::Tensor rot, torch::Tensor grad_inp){
+    uint32_t B = grad_out.size(0);
+    uint32_t gridsize = DIV_ROUND_UP(B, 1024);
+    world2camera_backward_kernel<<<gridsize, 1024>>>(grad_out.data_ptr<float>(), rot.data_ptr<float>(), grad_inp.data_ptr<float>(), B);
 }
 
 __global__ void calc_tile_info_kernel(
@@ -361,7 +384,7 @@ void gather_gaussians(
     );
 }
 
-template<uint32_t SMSIZE>
+template<uint32_t SMSIZE, typename T>
 __global__ void draw_backward_kernel(
     const float * gaussian_pos,
     const float * gaussian_rgb,
@@ -379,7 +402,8 @@ __global__ void draw_backward_kernel(
     const uint32_t w,
     const uint32_t h,
     const bool weight_normalize,
-    const bool sigmoid
+    const bool sigmoid,
+    const bool fast
 ){
     uint32_t id_x = blockDim.x * blockIdx.x + threadIdx.x;
     uint32_t id_y = blockDim.y * blockIdx.y + threadIdx.y;
@@ -420,11 +444,11 @@ __global__ void draw_backward_kernel(
     float pixel_x = (id_x + 0.5 - w/2)/focal_x;
     float pixel_y = (id_y + 0.5 - h/2)/focal_y;
     float color[] = {0, 0, 0};
-    double current_prob = 0.0;
-    double current_prob_c0, current_prob0, current_prob1;
+    T current_prob = 0.0;
+    T current_prob_c0, current_prob0, current_prob1;
     float accum = 1.0;
     float accum_weight = 0.0;
-    double _a, _b, _c, _d, _x, _y, det;
+    T _a, _b, _c, _d, _x, _y, det;
     float alpha, weight;
 
     // load to memory
@@ -480,40 +504,45 @@ __global__ void draw_backward_kernel(
             _y = pixel_y - _gaussian_pos[i*2 + 1];
             det = (_a * _d - _b * _c);
 
-            double Pm = -(_d * _x * _x - (_b + _c) * _x * _y + _a * _y * _y);
-            double Pn = (2 * det + 1e-14);
+            T Pm = -(_d * _x * _x - (_b + _c) * _x * _y + _a * _y * _y);
+            T Pn = (2 * det + 1e-14);
 
             current_prob_c0 = sigmoid ? 1.0/2*3.1415926536 : 1.0;
             current_prob0 = sigmoid ? current_prob_c0 * rsqrtf(det+1e-7) : 1.0;
-            current_prob1 = exp(Pm / Pn);
+            if(fast){
+                current_prob1 = __expf(Pm / Pn);
+            }
+            else{
+                current_prob1 = exp(Pm / Pn);
+            }
             current_prob = current_prob0 * current_prob1;
             
             // gradient primitives for 2d gaussian
-            double dPm_da = - (_y * _y);
-            double dPm_db = _x * _y;
-            double dPm_dc = _x * _y;
-            double dPm_dd = - (_x * _x);
-            double dPn_da = 2 * _d;
-            double dPn_db = -2 * _c;
-            double dPn_dc = -2 * _b;
-            double dPn_dd = 2 * _a;
-            double dP1_da = current_prob1 * (dPm_da*Pn - dPn_da*Pm) / (Pn*Pn);
-            double dP1_db = current_prob1 * (dPm_db*Pn - dPn_db*Pm) / (Pn*Pn);
-            double dP1_dc = current_prob1 * (dPm_dc*Pn - dPn_dc*Pm) / (Pn*Pn);
-            double dP1_dd = current_prob1 * (dPm_dd*Pn - dPn_dd*Pm) / (Pn*Pn);
+            T dPm_da = - (_y * _y);
+            T dPm_db = _x * _y;
+            T dPm_dc = _x * _y;
+            T dPm_dd = - (_x * _x);
+            T dPn_da = 2 * _d;
+            T dPn_db = -2 * _c;
+            T dPn_dc = -2 * _b;
+            T dPn_dd = 2 * _a;
+            T dP1_da = current_prob1 * (dPm_da*Pn - dPn_da*Pm) / (Pn*Pn);
+            T dP1_db = current_prob1 * (dPm_db*Pn - dPn_db*Pm) / (Pn*Pn);
+            T dP1_dc = current_prob1 * (dPm_dc*Pn - dPn_dc*Pm) / (Pn*Pn);
+            T dP1_dd = current_prob1 * (dPm_dd*Pn - dPn_dd*Pm) / (Pn*Pn);
 
-            double dP0_da = sigmoid ? -0.5 * (current_prob0 * current_prob0 * current_prob0) / (current_prob_c0 * current_prob_c0) * _d : 0.0;
-            double dP0_db = sigmoid ? 0.5 * (current_prob0 * current_prob0 * current_prob0) / (current_prob_c0 * current_prob_c0) * _c : 0.0;
-            double dP0_dc = sigmoid ? 0.5 * (current_prob0 * current_prob0 * current_prob0) / (current_prob_c0 * current_prob_c0) * _b : 0.0;
-            double dP0_dd = sigmoid ? -0.5 * (current_prob0 * current_prob0 * current_prob0) / (current_prob_c0 * current_prob_c0) * _a : 0.0;
+            T dP0_da = sigmoid ? -0.5 * (current_prob0 * current_prob0 * current_prob0) / (current_prob_c0 * current_prob_c0) * _d : 0.0;
+            T dP0_db = sigmoid ? 0.5 * (current_prob0 * current_prob0 * current_prob0) / (current_prob_c0 * current_prob_c0) * _c : 0.0;
+            T dP0_dc = sigmoid ? 0.5 * (current_prob0 * current_prob0 * current_prob0) / (current_prob_c0 * current_prob_c0) * _b : 0.0;
+            T dP0_dd = sigmoid ? -0.5 * (current_prob0 * current_prob0 * current_prob0) / (current_prob_c0 * current_prob_c0) * _a : 0.0;
 
-            double dP_da = current_prob0 * dP1_da + current_prob1 * dP0_da;
-            double dP_db = current_prob0 * dP1_db + current_prob1 * dP0_db;
-            double dP_dc = current_prob0 * dP1_dc + current_prob1 * dP0_dc;
-            double dP_dd = current_prob0 * dP1_dd + current_prob1 * dP0_dd;
+            T dP_da = current_prob0 * dP1_da + current_prob1 * dP0_da;
+            T dP_db = current_prob0 * dP1_db + current_prob1 * dP0_db;
+            T dP_dc = current_prob0 * dP1_dc + current_prob1 * dP0_dc;
+            T dP_dd = current_prob0 * dP1_dd + current_prob1 * dP0_dd;
             // gradient w.r.t position (not _x, _y, with a minus)
-            double dP_dx = current_prob / Pn * (2*_d*_x - _b*_y - _c*_y);
-            double dP_dy = current_prob / Pn * (2*_a*_y - _b*_x - _c*_x);
+            T dP_dx = current_prob / Pn * (2*_d*_x - _b*_y - _c*_y);
+            T dP_dy = current_prob / Pn * (2*_a*_y - _b*_x - _c*_x);
 
             alpha = current_prob * _gaussian_opa[i];
             // sigmoid + scale -> 0-1
@@ -596,7 +625,7 @@ __global__ void draw_backward_kernel(
 }
 
 
-template<uint32_t SMSIZE>
+template<uint32_t SMSIZE, typename T>
 __global__ void draw_kernel(
     // Gaussian3ds & tile_sorted_gaussians, 
     const float * gaussian_pos,
@@ -610,7 +639,8 @@ __global__ void draw_kernel(
     const uint32_t w,
     const uint32_t h,
     const bool weight_normalize,
-    const bool sigmoid
+    const bool sigmoid,
+    const bool fast
 ){
     uint32_t id_x = blockDim.x * blockIdx.x + threadIdx.x;
     uint32_t id_y = blockDim.y * blockIdx.y + threadIdx.y;
@@ -629,10 +659,14 @@ __global__ void draw_kernel(
     float pixel_x = (id_x + 0.5 - w/2)/focal_x;
     float pixel_y = (id_y + 0.5 - h/2)/focal_y;
     float color[] = {0, 0, 0};
-    double current_prob = 0.0;
     float accum = 1.0;
     float accum_weight = 0.0;
-    double _a, _b, _c, _d, _x, _y, det;
+
+    // double current_prob = 0.0;
+    // double _a, _b, _c, _d, _x, _y, det;
+    T current_prob = 0.0;
+    T _a, _b, _c, _d, _x, _y, det;
+
     float alpha, weight;
 
     // load to memory
@@ -677,8 +711,12 @@ __global__ void draw_kernel(
             det = (_a * _d - _b * _c);
 
             current_prob = sigmoid ? 1.0/2*3.1415926536 * rsqrtf(det+1e-7) : 1;
-            //current_prob *= exp(-(_d * _x * _x - (_b + _c) * _x * _y + _a * _y * _y) / (2 * det + 1e-7));
-            current_prob *= exp(-(_d * _x * _x - (_b + _c) * _x * _y + _a * _y * _y) / (2 * det+1e-14));
+            if(fast){
+                current_prob *= __expf(-(_d * _x * _x - (_b + _c) * _x * _y + _a * _y * _y) / (2 * det+1e-14));
+            }
+            else{
+                current_prob *= exp(-(_d * _x * _x - (_b + _c) * _x * _y + _a * _y * _y) / (2 * det+1e-14));
+            }
 
             alpha = current_prob * _gaussian_opa[i];
             // printf("current_alpha: %f\n", alpha);
@@ -715,7 +753,8 @@ void draw(
     float focal_x, 
     float focal_y,
     bool weight_normalize,
-    bool sigmoid
+    bool sigmoid,
+    bool fast
 ){
     uint32_t h = res.size(0);
     uint32_t w = res.size(1); 
@@ -723,20 +762,40 @@ void draw(
     uint32_t gridsize_y = DIV_ROUND_UP(h, 16);
     dim3 gridsize(gridsize_x, gridsize_y, 1);
     dim3 blocksize(16, 16, 1);
-    draw_kernel<1200><<<gridsize, blocksize>>>(
-        gaussian_pos.data_ptr<float>(),
-        gaussian_rgb.data_ptr<float>(),
-        gaussian_opa.data_ptr<float>(),
-        gaussian_cov.data_ptr<float>(),
-        tile_n_point_accum.data_ptr<int>(),
-        res.data_ptr<float>(),
-        focal_x,
-        focal_y,
-        w,
-        h,
-        weight_normalize,
-        sigmoid
-    );
+    if(fast){
+        draw_kernel<1200, float><<<gridsize, blocksize>>>(
+            gaussian_pos.data_ptr<float>(),
+            gaussian_rgb.data_ptr<float>(),
+            gaussian_opa.data_ptr<float>(),
+            gaussian_cov.data_ptr<float>(),
+            tile_n_point_accum.data_ptr<int>(),
+            res.data_ptr<float>(),
+            focal_x,
+            focal_y,
+            w,
+            h,
+            weight_normalize,
+            sigmoid,
+            fast
+        );
+    }
+    else{
+        draw_kernel<1200, double><<<gridsize, blocksize>>>(
+            gaussian_pos.data_ptr<float>(),
+            gaussian_rgb.data_ptr<float>(),
+            gaussian_opa.data_ptr<float>(),
+            gaussian_cov.data_ptr<float>(),
+            tile_n_point_accum.data_ptr<int>(),
+            res.data_ptr<float>(),
+            focal_x,
+            focal_y,
+            w,
+            h,
+            weight_normalize,
+            sigmoid,
+            fast
+        );
+    }
 }
 
 void draw_backward(
@@ -754,7 +813,8 @@ void draw_backward(
     float focal_x, 
     float focal_y,
     bool weight_normalize,
-    bool sigmoid
+    bool sigmoid,
+    bool fast
 ){
     uint32_t h = output.size(0);
     uint32_t w = output.size(1); 
@@ -762,25 +822,50 @@ void draw_backward(
     uint32_t gridsize_y = DIV_ROUND_UP(h, 16);
     dim3 gridsize(gridsize_x, gridsize_y, 1);
     dim3 blocksize(16, 16, 1);
-    draw_backward_kernel<512><<<gridsize, blocksize>>>(
-        gaussian_pos.data_ptr<float>(),
-        gaussian_rgb.data_ptr<float>(),
-        gaussian_opa.data_ptr<float>(),
-        gaussian_cov.data_ptr<float>(),
-        tile_n_point_accum.data_ptr<int>(),
-        output.data_ptr<float>(),
-        grad_output.data_ptr<float>(),
-        grad_pos.data_ptr<float>(),
-        grad_rgb.data_ptr<float>(),
-        grad_opa.data_ptr<float>(),
-        grad_cov.data_ptr<float>(),
-        focal_x,
-        focal_y,
-        w,
-        h,
-        weight_normalize,
-        sigmoid
-    );
+    if(fast){
+        draw_backward_kernel<512, float><<<gridsize, blocksize>>>(
+            gaussian_pos.data_ptr<float>(),
+            gaussian_rgb.data_ptr<float>(),
+            gaussian_opa.data_ptr<float>(),
+            gaussian_cov.data_ptr<float>(),
+            tile_n_point_accum.data_ptr<int>(),
+            output.data_ptr<float>(),
+            grad_output.data_ptr<float>(),
+            grad_pos.data_ptr<float>(),
+            grad_rgb.data_ptr<float>(),
+            grad_opa.data_ptr<float>(),
+            grad_cov.data_ptr<float>(),
+            focal_x,
+            focal_y,
+            w,
+            h,
+            weight_normalize,
+            sigmoid,
+            fast
+        );
+    }
+    else{
+        draw_backward_kernel<512, double><<<gridsize, blocksize>>>(
+            gaussian_pos.data_ptr<float>(),
+            gaussian_rgb.data_ptr<float>(),
+            gaussian_opa.data_ptr<float>(),
+            gaussian_cov.data_ptr<float>(),
+            tile_n_point_accum.data_ptr<int>(),
+            output.data_ptr<float>(),
+            grad_output.data_ptr<float>(),
+            grad_pos.data_ptr<float>(),
+            grad_rgb.data_ptr<float>(),
+            grad_opa.data_ptr<float>(),
+            grad_cov.data_ptr<float>(),
+            focal_x,
+            focal_y,
+            w,
+            h,
+            weight_normalize,
+            sigmoid,
+            fast
+        );
+    }
 }
 
 __device__ void world_to_camera(
@@ -860,7 +945,7 @@ __global__ void global_culling_kernel(
     // printf("z: %f\n", pos_c[2]);
 
     // 2. check if the point is before the near plane
-    if(pos_c[2] < near){
+    if(pos_c[2] <= near){
         // culling_mask[pid] = 0;
         return;
     }
@@ -872,7 +957,7 @@ __global__ void global_culling_kernel(
     pos_i[2] = sqrtf(pos_c[0]*pos_c[0] + pos_c[1]*pos_c[1] + pos_c[2]*pos_c[2]);
 
     // 4. frustum culling
-    if(abs(pos_i[0]) > half_width || abs(pos_i[1]) > half_height){
+    if(abs(pos_i[0]) >= half_width || abs(pos_i[1]) >= half_height){
         // culling_mask[pid] = 0;
         return;
     }
@@ -923,6 +1008,7 @@ __global__ void global_culling_kernel(
             }
         }
     }
+
     float RSSR[9];
     #pragma unroll
     for(uint32_t i_r=0; i_r<3; ++i_r){
@@ -936,8 +1022,11 @@ __global__ void global_culling_kernel(
         }
     }
     
+    
+
     float jacobian[9];
     calc_jacobian(pos_c, jacobian);
+
     // jacobian is required to multiplied by rotation matrix, in the form of jwRSSRw'j'
 
     float JW[9];
@@ -952,6 +1041,7 @@ __global__ void global_culling_kernel(
             }
         }
     }
+
     float JWC[9];
     #pragma unroll
     for(int i_r=0; i_r<3; ++i_r){
@@ -1161,7 +1251,9 @@ __global__ void global_culling_backward_kernel(
             grad_RS[i_r*3+i_c] = 0;
             #pragma unroll
             for(uint32_t i_k=0; i_k<3; ++i_k){
-                grad_RS[i_r*3+i_c] += 2 * grad_3d_cov[i_r*3+i_k] * RS[i_c*3+i_k];
+                // grad_RS[i_r*3+i_c] += 2 * grad_3d_cov[i_r*3+i_k] * RS[i_c*3+i_k];
+                // grad_RS[i_r*3+i_c] += (grad_3d_cov[i_k*3+i_r] + grad_3d_cov[i_r*3+i_k]) * RS[i_c*3+i_k];
+                grad_RS[i_r*3+i_c] += (grad_3d_cov[i_k*3+i_r] + grad_3d_cov[i_r*3+i_k]) * RS[i_k*3+i_c];
             }
         }
     }

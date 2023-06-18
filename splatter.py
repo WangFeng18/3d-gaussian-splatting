@@ -3,7 +3,7 @@ import math
 import torch
 import torch.nn as nn
 import gaussian
-from utils import read_points3d_binary, read_cameras_binary, read_images_binary, q2r, jacobian_torch, initialize_sh, inverse_sigmoid, inverse_sigmoid_torch, Timer, sample_two_point
+from utils import read_points3d_binary, read_cameras_binary, read_images_binary, q2r, jacobian_torch, initialize_sh, inverse_sigmoid, inverse_sigmoid_torch, Timer, sample_two_point, Camera
 from dataclasses import dataclass, field
 import transforms as tf
 import time
@@ -12,16 +12,18 @@ import cv2
 import numpy as np
 from typing import Any, List
 from einops import repeat
-from renderer import draw, trunc_exp, global_culling
+from renderer import draw, trunc_exp, global_culling, world2camera_func
 from tqdm import tqdm
+import argparse
 
     
 def world_to_camera(points, rot, tran):
     # r = torch.empty_like(points)
     # gaussian.world2camera(points, rot, tran, r)
     # return r
-    _r = points @ rot.T + tran.unsqueeze(0)
-    return _r
+    return world2camera_func(points, rot, tran)
+    # _r = points @ rot.T + tran.unsqueeze(0)
+    # return _r
 
 def camera_to_image(points_camera_space):
     points_image_space = [
@@ -115,7 +117,17 @@ class Gaussian3ds(nn.Module):
     def reset_opa(self):
         torch.nn.init.uniform_(self.opa, a=inverse_sigmoid(0.1), b=inverse_sigmoid(0.11))
     
-    def adaptive_control(self, grad, taus, delete_thresh, scale_activation="abs"):
+    def adaptive_control(
+        self, 
+        grad, 
+        taus, 
+        delete_thresh, 
+        scale_activation="abs",
+        grad_thresh=0.0002,
+        grad_aggregation="max",
+        use_clone=True,
+        use_split=True
+    ):
         # grad: B x 3
         # densification
         # 1. delete gaussians with small opacities
@@ -139,7 +151,13 @@ class Gaussian3ds(nn.Module):
         grad = grad[_mask]
         print("DELETE: {} Gaussians".format((~_mask).sum()))
         # 2. clone or split
-        densify_mask = grad.abs().max(-1)[0] > 0.0002
+
+        if grad_aggregation == "max":
+            densify_mask = grad.abs().max(-1)[0] > grad_thresh
+        else:
+            assert grad_aggregation == "mean"
+            densify_mask = grad.abs().mean(-1) > grad_thresh
+
         cat_pos = [self.pos.clone().detach()]
         cat_rgb = [self.rgb.clone().detach()]
         cat_opa = [self.opa.clone().detach()]
@@ -151,9 +169,9 @@ class Gaussian3ds(nn.Module):
             clone_mask = scale_norm <= taus
             split_mask = split_mask & densify_mask
             clone_mask = clone_mask & densify_mask
-            if clone_mask.any():
+
+            if clone_mask.any() and use_clone:
                 cloned_pos = self.pos[clone_mask].clone().detach()
-                # cloned_pos -= grad[clone_mask] * 0.01
                 cloned_pos -= grad[clone_mask] * 0.01
                 cloned_rgb = self.rgb[clone_mask].clone().detach()
                 cloned_opa = self.opa[clone_mask].clone().detach()
@@ -166,7 +184,7 @@ class Gaussian3ds(nn.Module):
                 cat_quat.append(cloned_quat)
                 cat_scale.append(cloned_scale)
 
-            if split_mask.any():
+            if split_mask.any() and use_split:
                 _scale = self.scale.clone().detach() 
                 if scale_activation == "abs":
                     _scale[split_mask] /= 1.6
@@ -219,14 +237,14 @@ class Gaussian3ds(nn.Module):
                 gaussian.jacobian(pos_cam_space, jacobian)
             else:
                 jacobian = jacobian_torch(pos_cam_space)
-
         with Timer("        cov1"):
             gaussian_3d_cov = self.get_gaussian_3d_cov(scale_activation=scale_activation)
             # JW = torch.einsum("bij,bjk->bik", jacobian, rot.unsqueeze(dim=0))
         with Timer("        cov2"):
             JW = torch.matmul(jacobian, rot.unsqueeze(dim=0))
         with Timer("        cov3"):
-            gaussian_2d_cov = torch.bmm(torch.bmm(JW, gaussian_3d_cov), JW.permute(0,2,1))[:, :2, :2]
+            JWC = torch.bmm(JW, gaussian_3d_cov)
+            gaussian_2d_cov = torch.bmm(JWC, JW.permute(0,2,1))[:, :2, :2]
 
         with Timer("        last"):
             gaussian_3ds_image_space = Gaussian3ds(
@@ -306,6 +324,9 @@ class Splatter(nn.Module):
         debug=1,
         scale_activation="abs",
         cudaculling=0,
+        load_ckpt=None,
+        debug_align=False,
+        fast_drawing=False,
     ):
         super().__init__()
         self.device = torch.device("cuda")
@@ -321,6 +342,7 @@ class Splatter(nn.Module):
         self.scale_activation = scale_activation
         self.cudaculling = cudaculling
         assert jacobian_calc == "cuda" or jacobian_calc == "torch"
+        self.fast_drawing = fast_drawing
 
         self.points3d = read_points3d_binary(os.path.join(colmap_path, "points3D.bin"))
         self.cameras = read_cameras_binary(os.path.join(colmap_path,"cameras.bin"))
@@ -343,26 +365,42 @@ class Splatter(nn.Module):
             rgb = initialize_sh(rgb)
         
         _pos=torch.stack(_points).to(torch.float32).to(self.device)
-        mean_min_three_dis = []
-        for i_pos in tqdm(range(_pos.shape[0])):
-            _r = (_pos[i_pos:i_pos+1] - _pos).norm(dim=-1).sort(dim=-1)[0][1:4].mean().item()
-            mean_min_three_dis.append(_r)
-        mean_min_three_dis = torch.Tensor(mean_min_three_dis).to(torch.float32) * scale_init_value
+        if load_ckpt is None:
+            mean_min_three_dis = []
+            for i_pos in tqdm(range(_pos.shape[0])):
+                _r = (_pos[i_pos:i_pos+1] - _pos).norm(dim=-1).sort(dim=-1)[0][1:4].mean().item()
+                mean_min_three_dis.append(_r)
+            mean_min_three_dis = torch.Tensor(mean_min_three_dis).to(torch.float32) * scale_init_value
 
-        if scale_activation == "exp":
-            mean_min_three_dis = mean_min_three_dis.log()
+            if scale_activation == "exp":
+                mean_min_three_dis = mean_min_three_dis.log()
 
-        self.gaussian_3ds = Gaussian3ds(
-            pos=_pos.to(self.device), # B x 3
-            rgb = rgb, # B x 3 or 27
-            opa = torch.ones(len(_points)).to(torch.float32).to(self.device)*inverse_sigmoid(opa_init_value), # B
-            quat = torch.Tensor([1, 0, 0, 0]).unsqueeze(dim=0).repeat(len(_points),1).to(torch.float32).to(self.device), # B x 4
-            # quat = torch.Tensor([1, 1, 2, 1]).unsqueeze(dim=0).repeat(len(_points),1).to(torch.float32).to(self.device), # B x 4
-            #scale = torch.ones(len(_points), 3).to(torch.float32).to(self.device)*math.log(scale_init_value),
-            #scale = torch.ones(len(_points), 3).to(torch.float32).to(self.device)*scale_init_value,
-            scale = torch.ones(len(_points), 3).to(torch.float32).to(self.device)*mean_min_three_dis.unsqueeze(dim=1).to(self.device),
-            init_values=True,
-        )
+            self.gaussian_3ds = Gaussian3ds(
+                pos=_pos.to(self.device), # B x 3
+                rgb = rgb, # B x 3 or 27
+                opa = torch.ones(len(_points)).to(torch.float32).to(self.device)*inverse_sigmoid(opa_init_value), # B
+                quat = torch.Tensor([1, 0, 0, 0]).unsqueeze(dim=0).repeat(len(_points),1).to(torch.float32).to(self.device), # B x 4
+                scale = torch.ones(len(_points), 3).to(torch.float32).to(self.device)*mean_min_three_dis.unsqueeze(dim=1).to(self.device),
+                init_values=True,
+            )
+        else:
+            self.gaussian_3ds = Gaussian3ds(
+                pos=_pos.to(self.device), # B x 3
+                rgb = rgb, # B x 3 or 27
+                opa = torch.ones(len(_points)).to(torch.float32).to(self.device)*inverse_sigmoid(opa_init_value), # B
+                quat = torch.Tensor([1, 0, 0, 0]).unsqueeze(dim=0).repeat(len(_points),1).to(torch.float32).to(self.device), # B x 4
+                scale = torch.ones(len(_points), 3).to(torch.float32).to(self.device),
+                init_values=True,
+            )
+
+        if load_ckpt is not None:
+            # load checkpoint
+            ckpt = torch.load(load_ckpt)
+            self.gaussian_3ds.pos = nn.Parameter(ckpt["pos"])
+            self.gaussian_3ds.opa = nn.Parameter(ckpt["opa"])
+            self.gaussian_3ds.rgb = nn.Parameter(ckpt["rgb"])
+            self.gaussian_3ds.quat = nn.Parameter(ckpt["quat"])
+            self.gaussian_3ds.scale = nn.Parameter(ckpt["scale"])
         self.current_camera = None
         self.set_camera(0)
     
@@ -389,27 +427,52 @@ class Splatter(nn.Module):
             self.w2c_quats.append(torch.from_numpy(T_world_camera.rotation().wxyz).to(torch.float32).to(self.device))
             self.w2c_trans.append(torch.from_numpy(T_world_camera.translation()).to(torch.float32).to(self.device))
             self.w2c_rots.append(q2r(self.w2c_quats[-1].unsqueeze(0)).squeeze().to(torch.float32).to(self.device))
+            # print(self.w2c_trans)
+            # print(self.w2c_rots)
             self.cam_ids.append(img_info.camera_id)
 
-    def set_camera(self, idx):
-        with Timer("    set image"):
-            with Timer("        set image 1"):
+        # print(torch.stack(self.w2c_trans, dim=0).mean(0))
+        # print(torch.stack(self.w2c_rots, dim=0).mean(0))
+
+    def set_camera(self, idx, extrinsics=None, intrinsics=None):
+        if idx is None:
+            print(extrinsics)
+            self.current_w2c_rot = torch.from_numpy(extrinsics["rot"]).to(torch.float32).to(self.device)
+            self.current_w2c_tran = torch.from_numpy(extrinsics["tran"]).to(torch.float32).to(self.device)
+            self.current_w2c_quat = None
+            self.ground_truth = None
+            self.current_camera = Camera(
+                id=-1, model="pinhole", width=intrinsics["width"], height=intrinsics["height"],
+                params = np.array(
+                    [intrinsics["focal_x"], intrinsics["focal_y"]]
+                ),
+            )
+            self.tile_info = Tiles(
+                math.ceil(intrinsics["width"]), 
+                math.ceil(intrinsics["height"]), 
+                intrinsics["focal_x"], 
+                intrinsics["focal_y"], 
+                self.device
+            )
+            self.tile_info_cpp = self.tile_info.create_tiles()
+            return 
+        else:
+            with Timer("    set image"):
                 self.current_w2c_quat = self.w2c_quats[idx]
-            with Timer("        set image 2"):
                 self.current_w2c_tran = self.w2c_trans[idx]
-            with Timer("        set image 3"):
                 self.current_w2c_rot = self.w2c_rots[idx]
-            with Timer("        set image 4"):
                 self.ground_truth = self.imgs[idx].to(torch.float16)/255.
-        with Timer("    set camera"):
-            if self.cameras[self.cam_ids[idx]] != self.current_camera:
-                self.current_camera = self.cameras[self.cam_ids[idx]]
-                width = self.current_camera.width / self.render_downsample
-                height = self.current_camera.height / self.render_downsample
-                focal_x = self.current_camera.params[0] / self.render_downsample
-                focal_y = self.current_camera.params[1] / self.render_downsample
-                self.tile_info = Tiles(math.ceil(width), math.ceil(height), focal_x, focal_y, self.device)
-                self.tile_info_cpp = self.tile_info.create_tiles()
+            with Timer("    set camera"):
+                if self.cameras[self.cam_ids[idx]] != self.current_camera:
+                    self.current_camera = self.cameras[self.cam_ids[idx]]
+                    width = self.current_camera.width / self.render_downsample
+                    height = self.current_camera.height / self.render_downsample
+                    focal_x = self.current_camera.params[0] / self.render_downsample
+                    focal_y = self.current_camera.params[1] / self.render_downsample
+                    print(focal_x)
+                    print(focal_y)
+                    self.tile_info = Tiles(math.ceil(width), math.ceil(height), focal_x, focal_y, self.device)
+                    self.tile_info_cpp = self.tile_info.create_tiles()
         # print("current_camera info")
         # print(self.current_camera)
 
@@ -423,9 +486,9 @@ class Splatter(nn.Module):
                 # self.gaussian_3ds.opa = self.gaussian_3ds.opa.sigmoid()
                 # self.gaussian_3ds.quat = self.gaussian_3ds.quat / self.gaussian_3ds.quat.norm(dim=-1, keepdim=True)
                 # self.gaussian_3ds.scale = self.gaussian_3ds.scale.abs()+1e-5
-                normed_quat = (self.gaussian_3ds.quat/self.gaussian_3ds.quat.norm(dim=-1, keepdim=True))
+                normed_quat = (self.gaussian_3ds.quat/self.gaussian_3ds.quat.norm(dim=1, keepdim=True))
                 if self.scale_activation == "abs":
-                    normed_scale = self.gaussian_3ds.scale.abs()+1e-6
+                    normed_scale = self.gaussian_3ds.scale.abs()+1e-4
                 else:
                     assert self.scale_activation == "exp"
                     normed_scale = trunc_exp(self.gaussian_3ds.scale)
@@ -436,8 +499,8 @@ class Splatter(nn.Module):
                     self.current_w2c_rot.detach(), 
                     self.current_w2c_tran.detach(), 
                     self.near, 
-                    self.current_camera.width/2/self.current_camera.params[0], 
-                    self.current_camera.height/2/self.current_camera.params[1],
+                    self.current_camera.width*1.2/2/self.current_camera.params[0], 
+                    self.current_camera.height*1.2/2/self.current_camera.params[1],
                 )
 
                 self.culling_gaussian_3d_image_space = Gaussian3ds(
@@ -448,20 +511,23 @@ class Splatter(nn.Module):
                 )
                 # print(len(self.culling_gaussian_3d_image_space.pos))
         else:
-            gaussian_3ds_pos_camera_space = world_to_camera(self.gaussian_3ds.pos, self.current_w2c_rot, self.current_w2c_tran)
-            valid = gaussian_3ds_pos_camera_space[:,2] > self.near
-            gaussian_3ds_pos_image_space = camera_to_image(gaussian_3ds_pos_camera_space)
-            culling_mask = (gaussian_3ds_pos_image_space[:, 0].abs() < (self.current_camera.width*1.2/2/self.current_camera.params[0]))  & \
-                            (gaussian_3ds_pos_image_space[:, 1].abs() < (self.current_camera.height*1.2/2/self.current_camera.params[1]))
-            valid &= culling_mask
-            self.gaussian_3ds_valid = self.gaussian_3ds.filte(valid)
-            self.culling_gaussian_3d_image_space = self.gaussian_3ds_valid.project(
-                self.current_w2c_rot, 
-                self.current_w2c_tran, 
-                self.near, 
-                self.jacobian_calc,
-                scale_activation=self.scale_activation,
-            )
+            with Timer("culling 1"):
+                gaussian_3ds_pos_camera_space = world_to_camera(self.gaussian_3ds.pos, self.current_w2c_rot, self.current_w2c_tran)
+            with Timer("culling 2"):
+                valid = gaussian_3ds_pos_camera_space[:,2] > self.near
+                gaussian_3ds_pos_image_space = camera_to_image(gaussian_3ds_pos_camera_space)
+                culling_mask = (gaussian_3ds_pos_image_space[:, 0].abs() < (self.current_camera.width*1.2/2/self.current_camera.params[0]))  & \
+                                (gaussian_3ds_pos_image_space[:, 1].abs() < (self.current_camera.height*1.2/2/self.current_camera.params[1]))
+                valid &= culling_mask
+                self.gaussian_3ds_valid = self.gaussian_3ds.filte(valid)
+            with Timer("cullint 3"):
+                self.culling_gaussian_3d_image_space = self.gaussian_3ds_valid.project(
+                    self.current_w2c_rot, 
+                    self.current_w2c_tran, 
+                    self.near, 
+                    self.jacobian_calc,
+                    scale_activation=self.scale_activation,
+                )
         
     def render(self, out_write=True):
         # self.tic.record()
@@ -527,6 +593,7 @@ class Splatter(nn.Module):
                 self.render_weight_normalize,
                 False,
                 self.use_sh_coeff,
+                self.fast_drawing
             ) 
 
         with Timer("    write out", debug=self.debug):
@@ -536,12 +603,12 @@ class Splatter(nn.Module):
 
         return rendered_image
 
-    def forward(self, camera_id=None, record_view_space_pos_grad=False):
+    def forward(self, camera_id=None, extrinsics=None, intrinsics=None):
         # print(self.gaussian_3ds.opa.max())
         # print(self.gaussian_3ds.opa.min())
         with Timer("forward", debug=self.debug):
             with Timer("set camera"):
-                self.set_camera(camera_id)
+                self.set_camera(camera_id, extrinsics, intrinsics)
             with Timer("frustum culling", debug=self.debug):
                 self.project_and_culling()
             with Timer("render function", debug=self.debug):
@@ -552,8 +619,41 @@ class Splatter(nn.Module):
         return ret
 
 if __name__ == "__main__":
-    test = Splatter(os.path.join("colmap_garden/sparse/0/"), "colmap_garden/images_2/", render_weight_normalize=False, jacobian_calc="torch", render_downsample=2, opa_init_value=0.8, scale_init_value=0.2)
-    test.forward(camera_id=0, cudaculling=False)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cudaculling", type=int, default=0)
+    opt = parser.parse_args()
+    test = Splatter(
+        os.path.join("colmap_garden/sparse/0/"), 
+        "colmap_garden/images_4/", 
+        render_weight_normalize=False, 
+        jacobian_calc="cuda", 
+        render_downsample=4, 
+        opa_init_value=0.8, 
+        scale_init_value=0.2,
+        cudaculling=opt.cudaculling,
+        load_ckpt="ckpt.pth",
+        scale_activation="exp",
+    )
+    test.forward(camera_id=0)
     loss = (test.ground_truth - test.forward(camera_id=0)).abs().mean()
     loss.backward()
-    print(test.gaussian_3ds.rgb.grad.max())
+
+    pos_grad = test.gaussian_3ds.pos.grad
+    print(pos_grad.mean(), pos_grad.max())
+
+    rgb_grad = test.gaussian_3ds.rgb.grad
+    print(rgb_grad.mean(), rgb_grad.max())
+
+    opa_grad = test.gaussian_3ds.opa.grad
+    print(opa_grad.mean(), opa_grad.max())
+
+    quat_grad = test.gaussian_3ds.quat.grad
+    print(quat_grad.mean(), quat_grad.max())
+
+    scale_grad = test.gaussian_3ds.scale.grad
+    print(scale_grad.mean(), scale_grad.max())
+
+    # print(test.culling_gaussian_3d_image_space.rgb.mean(), test.culling_gaussian_3d_image_space.rgb.max())
+    # print(test.culling_gaussian_3d_image_space.opa.mean(), test.culling_gaussian_3d_image_space.opa.max())
+    # print(test.culling_gaussian_3d_image_space.cov.mean(), test.culling_gaussian_3d_image_space.cov.max())
+    # print(test.culling_gaussian_3d_image_space.pos.mean(), test.culling_gaussian_3d_image_space.pos.max())
