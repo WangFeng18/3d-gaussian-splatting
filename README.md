@@ -30,3 +30,6 @@ python train.py # for 7k
 python train.py --ckpt ckpt.pth --gui 1 --test 1
 ```
 The GUI is based on [Viser](https://github.com/nerfstudio-project/viser) and written by [ZiLong Chen](https://github.com/heheyas).
+
+
+The transforms folder are from [Viser](https://github.com/nerfstudio-project/viser)
