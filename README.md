@@ -7,7 +7,11 @@ We implement the 3d gaussian splatting methods through PyTorch with CUDA extensi
 | --- | --- | --- | --- | --- |
 | Garden | 25.82(5k) | 24.28 (7k) | 160 FPS (avg MIPNeRF360) | 60 FPS |
 
-https://github.com/WangFeng18/3d-gaussian-splatting/assets/43294876/761951e6-b2b7-43d5-becf-1701a3504d0a
+
+
+https://github.com/WangFeng18/3d-gaussian-splatting/assets/43294876/79703b5d-50ae-404b-96c9-c73690646f34
+
+
 
 QuickStart
 
