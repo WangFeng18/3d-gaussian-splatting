@@ -19,9 +19,13 @@ class _Drawer(torch.autograd.Function):
         render_weight_normalize=False,
         sigmoid=False,
         use_sh_coeff=False,
-        fast=False
+        fast=False,
+        rays_o=None,
+        lefttop_pos=None,
+        vec_dx=None,
+        vec_dy=None
     ):
-        rendered_image = torch.zeros(padded_height, padded_width, 27 if use_sh_coeff else 3, device=gaussians_pos.device, dtype=torch.float32)
+        rendered_image = torch.zeros(padded_height, padded_width, 3, device=gaussians_pos.device, dtype=torch.float32)
         gaussian.draw(
             gaussians_pos,
             gaussians_rgb,
@@ -33,20 +37,26 @@ class _Drawer(torch.autograd.Function):
             focal_y,
             render_weight_normalize,
             sigmoid,
-            fast
+            fast,
+            rays_o,
+            lefttop_pos,
+            vec_dx,
+            vec_dy,
+            use_sh_coeff,
         )
-        ctx.save_for_backward(gaussians_pos, gaussians_rgb, gaussians_opa, gaussians_cov, tile_n_point_accum, rendered_image)
+        ctx.save_for_backward(gaussians_pos, gaussians_rgb, gaussians_opa, gaussians_cov, tile_n_point_accum, rendered_image, rays_o, lefttop_pos, vec_dx, vec_dy)
         ctx.focal_x = focal_x
         ctx.focal_y = focal_y
         ctx.render_weight_normalize = render_weight_normalize
         ctx.sigmoid = sigmoid
         ctx.fast = fast
+        ctx.use_sh_coeff = use_sh_coeff
         return rendered_image
     
     @staticmethod
     def backward(ctx, grad_output):
         # grad_output
-        gaussians_pos, gaussians_rgb, gaussians_opa, gaussians_cov, tile_n_point_accum, rendered_image = ctx.saved_tensors
+        gaussians_pos, gaussians_rgb, gaussians_opa, gaussians_cov, tile_n_point_accum, rendered_image, rays_o, lefttop_pos, vec_dx, vec_dy = ctx.saved_tensors
         grad_pos = torch.zeros_like(gaussians_pos)
         grad_rgb = torch.zeros_like(gaussians_rgb)
         grad_opa = torch.zeros_like(gaussians_opa)
@@ -67,9 +77,14 @@ class _Drawer(torch.autograd.Function):
             ctx.focal_y,
             ctx.render_weight_normalize,
             ctx.sigmoid,
-            ctx.fast
+            ctx.fast,
+            rays_o,
+            lefttop_pos,
+            vec_dx,
+            vec_dy,
+            ctx.use_sh_coeff,
         )
-        return grad_pos, grad_rgb, grad_opa, grad_cov, None, None, None, None, None, None, None, None, None
+        return grad_pos, grad_rgb, grad_opa, grad_cov, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 draw = _Drawer.apply
 

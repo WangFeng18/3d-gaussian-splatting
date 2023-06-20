@@ -15,31 +15,53 @@ class OrbitCamera:
         self.fovy = fovy # in degree
         self.near = near
         self.far = far
-        # self.center = np.array([0, 0, 0], dtype=np.float32) # look at this point
-        self.center = np.array([0.0209, -1.6423,  3.3493], dtype=np.float32) # look at this point
-        self.rot = R.from_matrix(np.eye(3)*0.2)
-        self.up = np.array([0, 0, 1], dtype=np.float32) # need to be normalized!
+        self.center = np.array([0, 0, -1], dtype=np.float32) # look at this point
+        # self.center = np.array([0.0209, -1.6423,  3.3493], dtype=np.float32) # look at this point
+        #self.center = np.array([0.0209, -1.6423,  3.3493], dtype=np.float32)*3 # look at this point
+        rot = np.eye(3)
+        rot[1,1] = 1
+        self.rot = R.from_matrix(rot)
+        # self.up = np.array([0, 0, 1], dtype=np.float32) # need to be normalized!
+        self.up = np.array([0, 1, 0], dtype=np.float32) # need to be normalized!
         self.focal = self.H / (2 * np.tan(np.radians(self.fovy) / 2))
         print(self.focal)
+
     # pose
+    # @property
+    # def pose(self):
+    #     # first move camera to radius
+    #     res = np.eye(4, dtype=np.float32)
+    #     res[2, 3] = self.radius # opengl convention...
+    #     # rotate
+    #     rot = np.eye(4, dtype=np.float32)
+    #     rot[:3, :3] = self.rot.as_matrix()
+    #     res = rot @ res
+    #     # translate
+    #     res[:3, 3] -= self.center
+    #     return res
+
+    def reset_up(self):
+        side = self.rot.as_matrix()[:3, 1] # why this is side --> ? # already normalized.
+        self.up = side
+
     @property
     def pose(self):
         # first move camera to radius
         res = np.eye(4, dtype=np.float32)
-        res[2, 3] = self.radius # opengl convention...
         # rotate
         rot = np.eye(4, dtype=np.float32)
         rot[:3, :3] = self.rot.as_matrix()
         res = rot @ res
-        # translate
+        res[2, 3] = self.radius # opengl convention...
         res[:3, 3] -= self.center
+        # translate
         return res
 
     # view
     @property
     def view(self):
         return np.linalg.inv(self.pose)
-    
+
     # intrinsics
     @property
     def intrinsics(self):
@@ -51,25 +73,33 @@ class OrbitCamera:
     def perspective(self):
         y = np.tan(np.radians(self.fovy) / 2)
         aspect = self.W / self.H
+        # return np.array([[1/(y*aspect),    0,            0,              0], 
+        #                  [           0,  -1/y,            0,              0],
+        #                  [           0,    0, -(self.far+self.near)/(self.far-self.near), -(2*self.far*self.near)/(self.far-self.near)], 
+        #                  [           0,    0,           -1,              0]], dtype=np.float32)
+
         return np.array([[1/(y*aspect),    0,            0,              0], 
-                         [           0,  -1/y,            0,              0],
+                         [           0,  1/y,            0,              0],
                          [           0,    0, -(self.far+self.near)/(self.far-self.near), -(2*self.far*self.near)/(self.far-self.near)], 
                          [           0,    0,           -1,              0]], dtype=np.float32)
 
-    
     def orbit(self, dx, dy):
         # rotate along camera up/side axis!
+        # side = self.rot.as_matrix()[:3, 0] # why this is side --> ? # already normalized.
         side = self.rot.as_matrix()[:3, 0] # why this is side --> ? # already normalized.
-        rotvec_x = self.up * np.radians(-0.05 * dx)
-        rotvec_y = side * np.radians(-0.05 * dy)
+        side = np.array([1, 0, 0], dtype=np.float32) # need to be normalized!
+        rotvec_x = self.up * np.radians(-0.005 * dx)
+        rotvec_y = side * np.radians(0.005 * dy)
         self.rot = R.from_rotvec(rotvec_x) * R.from_rotvec(rotvec_y) * self.rot
+        # self.rot = R.from_rotvec(rotvec_x) * self.rot
 
     def scale(self, delta):
         self.radius *= 1.1 ** (-delta)
 
     def pan(self, dx, dy, dz=0):
         # pan in camera coordinate system (careful on the sensitivity!)
-        self.center += 0.0005 * self.rot.as_matrix()[:3, :3] @ np.array([dx, -dy, dz])
+        # self.center += 0.0005 * self.rot.as_matrix()[:3, :3] @ np.array([dx, -dy, dz])
+        self.center -= 0.0005 * np.eye(3) @ np.array([dx, -dy, dz])
     
 
 class NeRFGUI:
@@ -236,6 +266,9 @@ class NeRFGUI:
             with dpg.group(horizontal=True):
                 dpg.add_text("SPP: ")
                 dpg.add_text("1", tag="_log_spp")
+                def callback_resetup(sender, app_data):
+                    self.cam.reset_up()
+                dpg.add_button(label="resetUp", tag="_reset_up", callback=callback_resetup)
 
             # train button
             if not self.opt.test:
@@ -264,6 +297,7 @@ class NeRFGUI:
                             self.trainer.save_checkpoint(full=True, best=False)
                             dpg.set_value("_log_ckpt", "saved " + os.path.basename(self.trainer.stats["checkpoints"][-1]))
                             self.trainer.epoch += 1 # use epoch to indicate different calls.
+
 
                         dpg.add_button(label="save", tag="_button_save", callback=callback_save)
                         dpg.bind_item_theme("_button_save", theme_button)
@@ -431,7 +465,7 @@ class NeRFGUI:
             dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Right, callback=callback_camera_drag_pan)
 
         
-        dpg.create_viewport(title='torch-ngp', width=self.W, height=self.H, resizable=False)
+        dpg.create_viewport(title='3d-gaussian-splatting', width=self.W, height=self.H, resizable=False)
         
         # TODO: seems dearpygui doesn't support resizing texture...
         # def callback_resize(sender, app_data):

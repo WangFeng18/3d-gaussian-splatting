@@ -8,6 +8,7 @@ import torch
 import math
 from collections import defaultdict
 from pprint import pprint
+from kornia import create_meshgrid
 
 @dataclass(frozen=True)
 class CameraModel:
@@ -342,8 +343,8 @@ def jacobian_torch(a):
 
 
 def initialize_sh(rgbs):
-    sh_coeff = torch.zeros(rgbs.shape[0], 9, 3, device=rgbs.device, dtype=rgbs.dtype)
-    sh_coeff[:, 0, :] = rgbs * 2 * math.sqrt(math.pi)
+    sh_coeff = torch.zeros(rgbs.shape[0], 3, 9, device=rgbs.device, dtype=rgbs.dtype)
+    sh_coeff[:, :, 0] = rgbs / 0.28209479177387814
     return sh_coeff.flatten(1)
 
 def inverse_sigmoid(y=0.001):
@@ -402,3 +403,17 @@ def sample_two_point(gaussian_pos, gaussian_cov):
 
 def clamp(x):
     return torch.clamp(x, min=0, max=1)
+
+
+def get_rays_direction_in_camera_space(H, W, focal):
+    grid = create_meshgrid(H, W, normalized_coordinates=False)[0] + 0.5
+    i, j = grid.unbind(-1)
+    cent = [W/2, H/2]
+    directions = torch.stack([(i - cent[0]) / focal[0], (j - cent[1]) / focal[1], torch.ones_like(i)], -1)
+    return directions
+
+def get_rays_direction(w2c_rot, H, W, focal):
+    c2w = torch.inverse(w2c_rot)
+    directions = get_rays_direction_in_camera_space(H, W, focal)
+    rays_d = directions @ c2w[:3, :3].T  # (H, W, 3)
+    return rays_d

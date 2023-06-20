@@ -425,17 +425,17 @@ __device__ __inline__ void calc_sh(
     }
 }
 
-template<uint32_t SMSIZE, typename T, uint32_t D>
+template<uint32_t SMSIZE, typename T>
 __global__ void draw_backward_kernel(
     const float * gaussian_pos,
-    const float * gaussian_rgb_coeff,
+    const float * gaussian_rgb,
     const float * gaussian_opa,
     const float * gaussian_cov,
     const int * tile_n_point_accum, 
     const float * output,
     const float * grad_output,
     float * grad_pos, 
-    float * grad_rgb_coeff,
+    float * grad_rgb,
     float * grad_opa,
     float * grad_cov,
     const float focal_x, 
@@ -444,12 +444,7 @@ __global__ void draw_backward_kernel(
     const uint32_t h,
     const bool weight_normalize,
     const bool sigmoid,
-    const bool fast,
-    const float* rays_o,
-    const float* lefttop_pos,
-    const float* vec_dx,
-    const float* vec_dy,
-    bool use_sh_coeff
+    const bool fast
 ){
     uint32_t id_x = blockDim.x * blockIdx.x + threadIdx.x;
     uint32_t id_y = blockDim.y * blockIdx.y + threadIdx.y;
@@ -458,36 +453,16 @@ __global__ void draw_backward_kernel(
     uint32_t start_idx = tile_n_point_accum[id_tile];
     uint32_t end_idx = tile_n_point_accum[id_tile+1];
     // const uint32_t interval_length = end_idx - start_idx;
-   
-    uint32_t id_thread = threadIdx.x + threadIdx.y * blockDim.x;
-    uint32_t blocksize = blockDim.x * blockDim.y;
-
-    // direction calculation
-    float current_dir[3];
-    float _norm = 0.0f;
-    #pragma unroll
-    for(uint32_t _i=0; _i<3; ++_i){
-        current_dir[_i] = lefttop_pos[_i] + id_x * vec_dx[_i] + id_y * vec_dy[_i] - rays_o[_i];
-        _norm += current_dir[_i] * current_dir[_i];
-    }
-    _norm = sqrtf(_norm);
-    #pragma unroll
-    for(uint32_t _i=0; _i<3;++_i){
-        current_dir[_i] = current_dir[_i] / (_norm + 1e-7);
-    }
-    float SH[9];
-    if(use_sh_coeff){
-        calc_sh(9, current_dir, SH);
-    }
-
     __shared__ float _gaussian_pos[SMSIZE*2];
-    __shared__ float _gaussian_rgb_coeff[SMSIZE*D];
+    __shared__ float _gaussian_rgb[SMSIZE*3];
     __shared__ float _gaussian_opa[SMSIZE*1];
     __shared__ float _gaussian_cov[SMSIZE*4];
     __shared__ float _grad_pos[SMSIZE*2];
-    __shared__ float _grad_rgb_coeff[SMSIZE*D];
+    __shared__ float _grad_rgb[SMSIZE*3];
     __shared__ float _grad_opa[SMSIZE*1];
     __shared__ float _grad_cov[SMSIZE*4];
+    uint32_t id_thread = threadIdx.x + threadIdx.y * blockDim.x;
+    uint32_t blocksize = blockDim.x * blockDim.y;
 
     // initialize shared memory for gradients
     for(uint32_t i=id_thread; i<SMSIZE; i+=blocksize){
@@ -496,8 +471,8 @@ __global__ void draw_backward_kernel(
             _grad_pos[i*2+_m] = 0;
         }
         #pragma unroll
-        for(uint32_t _m=0; _m<D; ++_m){
-            _grad_rgb_coeff[i*D+_m] = 0;
+        for(uint32_t _m=0; _m<3; ++_m){
+            _grad_rgb[i*3+_m] = 0;
         }
         _grad_opa[i] = 0;
         #pragma unroll
@@ -542,10 +517,9 @@ __global__ void draw_backward_kernel(
             _gaussian_pos[i*2 + 0] = gaussian_pos[(start_idx + i_loadings*SMSIZE + i)*3 + 0];
             _gaussian_pos[i*2 + 1] = gaussian_pos[(start_idx + i_loadings*SMSIZE + i)*3 + 1];
             // rgb
-            #pragma unroll
-            for(uint32_t _i_rgb_coeff=0; _i_rgb_coeff<D; ++_i_rgb_coeff){
-                _gaussian_rgb_coeff[i*D + _i_rgb_coeff] = gaussian_rgb_coeff[(start_idx + i_loadings*SMSIZE + i)*D + _i_rgb_coeff];
-            }
+            _gaussian_rgb[i*3 + 0] = gaussian_rgb[(start_idx + i_loadings*SMSIZE + i)*3 + 0];
+            _gaussian_rgb[i*3 + 1] = gaussian_rgb[(start_idx + i_loadings*SMSIZE + i)*3 + 1];
+            _gaussian_rgb[i*3 + 2] = gaussian_rgb[(start_idx + i_loadings*SMSIZE + i)*3 + 2];
             // opa
             _gaussian_opa[i] = gaussian_opa[start_idx + i_loadings*SMSIZE + i];
             // cov
@@ -617,47 +591,19 @@ __global__ void draw_backward_kernel(
                 alpha = 2./(exp(-alpha)+1) - 1;
             }
             weight = alpha * accum;
-
-            float cur_point_color[] = {0.0, 0.0, 0.0};
-            if(use_sh_coeff){
-                #pragma unroll
-                for(uint32_t _i_channel=0; _i_channel<3; ++_i_channel){
-                    #pragma unroll
-                    for(uint32_t _i_sh=0; _i_sh<9; ++_i_sh){
-                        cur_point_color[_i_channel] += SH[_i_sh] * _gaussian_rgb_coeff[i*27 + _i_channel*9 + _i_sh];
-                    }
-                }
-
-                #pragma unroll
-                for(uint32_t _i_channel=0; _i_channel<3; ++_i_channel){
-                    cur_point_color[_i_channel] = 1./(1 + __expf(-cur_point_color[_i_channel]));
-                }
-            }
-            else{
-                cur_point_color[0] = _gaussian_rgb_coeff[i*3 + 0];
-                cur_point_color[1] = _gaussian_rgb_coeff[i*3 + 1];
-                cur_point_color[2] = _gaussian_rgb_coeff[i*3 + 2];
-            }
-
+            float cur_point_color[3];
+            cur_point_color[0] = _gaussian_rgb[i*3 + 0];
+            cur_point_color[1] = _gaussian_rgb[i*3 + 1];
+            cur_point_color[2] = _gaussian_rgb[i*3 + 2];
             color[0] += cur_point_color[0] * weight;
             color[1] += cur_point_color[1] * weight;
             color[2] += cur_point_color[2] * weight;
             accum_weight += weight;
 
             // grad w.r.t gaussian rgb
-            if(use_sh_coeff){
-                #pragma unroll
-                for(uint32_t _i_sh=0; _i_sh<9; ++_i_sh){
-                    atomicAdd(_grad_rgb_coeff+i*27+0+_i_sh, cur_grad_out[0]*weight*(cur_point_color[0]*(1-cur_point_color[0]))*SH[_i_sh]);
-                    atomicAdd(_grad_rgb_coeff+i*27+9+_i_sh, cur_grad_out[1]*weight*(cur_point_color[1]*(1-cur_point_color[1]))*SH[_i_sh]);
-                    atomicAdd(_grad_rgb_coeff+i*27+18+_i_sh, cur_grad_out[2]*weight*(cur_point_color[2]*(1-cur_point_color[2]))*SH[_i_sh]);
-                }
-            }
-            else{
-                atomicAdd(_grad_rgb_coeff+i*3+0, cur_grad_out[0]*weight);
-                atomicAdd(_grad_rgb_coeff+i*3+1, cur_grad_out[1]*weight);
-                atomicAdd(_grad_rgb_coeff+i*3+2, cur_grad_out[2]*weight);
-            }
+            atomicAdd(_grad_rgb+i*3+0, cur_grad_out[0]*weight);
+            atomicAdd(_grad_rgb+i*3+1, cur_grad_out[1]*weight);
+            atomicAdd(_grad_rgb+i*3+2, cur_grad_out[2]*weight);
 
             // grad w.r.t pos opa cov -> grad w.r.t alpha
             float d_alpha = 0;
@@ -703,10 +649,9 @@ __global__ void draw_backward_kernel(
             grad_pos[(start_idx + i_loadings*SMSIZE + i)*3 + 0] = _grad_pos[i*2 + 0];
             grad_pos[(start_idx + i_loadings*SMSIZE + i)*3 + 1] = _grad_pos[i*2 + 1];
 
-            #pragma unroll
-            for(uint32_t _i_rgb_coeff=0; _i_rgb_coeff<D; ++_i_rgb_coeff){
-                grad_rgb_coeff[(start_idx + i_loadings*SMSIZE + i)*D + _i_rgb_coeff] = _grad_rgb_coeff[i*D + _i_rgb_coeff];
-            }
+            grad_rgb[(start_idx + i_loadings*SMSIZE + i)*3 + 0] = _grad_rgb[i*3 + 0];
+            grad_rgb[(start_idx + i_loadings*SMSIZE + i)*3 + 1] = _grad_rgb[i*3 + 1];
+            grad_rgb[(start_idx + i_loadings*SMSIZE + i)*3 + 2] = _grad_rgb[i*3 + 2];
 
             grad_opa[(start_idx + i_loadings*SMSIZE + i)*1 + 0] = _grad_opa[i];
 
@@ -721,11 +666,11 @@ __global__ void draw_backward_kernel(
 }
 
 
-template<uint32_t SMSIZE, typename T, uint32_t D>
+template<uint32_t SMSIZE, typename T>
 __global__ void draw_kernel(
     // Gaussian3ds & tile_sorted_gaussians, 
     const float * gaussian_pos,
-    const float * gaussian_rgb_coeff,
+    const float * gaussian_rgb,
     const float * gaussian_opa,
     const float * gaussian_cov,
     const int * tile_n_point_accum, 
@@ -736,13 +681,7 @@ __global__ void draw_kernel(
     const uint32_t h,
     const bool weight_normalize,
     const bool sigmoid,
-    const bool fast,
-    // for direction
-    float* rays_o,
-    const float* lefttop_pos,
-    const float* vec_dx,
-    const float* vec_dy,
-    bool use_sh_coeff
+    const bool fast
 ){
     uint32_t id_x = blockDim.x * blockIdx.x + threadIdx.x;
     uint32_t id_y = blockDim.y * blockIdx.y + threadIdx.y;
@@ -751,6 +690,10 @@ __global__ void draw_kernel(
     uint32_t start_idx = tile_n_point_accum[id_tile];
     uint32_t end_idx = tile_n_point_accum[id_tile+1];
     // const uint32_t interval_length = end_idx - start_idx;
+    __shared__ float _gaussian_pos[SMSIZE*2];
+    __shared__ float _gaussian_rgb[SMSIZE*3];
+    __shared__ float _gaussian_opa[SMSIZE*1];
+    __shared__ float _gaussian_cov[SMSIZE*4];
     uint32_t id_thread = threadIdx.x + threadIdx.y * blockDim.x;
     uint32_t blocksize = blockDim.x * blockDim.y;
     //draw: access all point with early stop
@@ -759,29 +702,6 @@ __global__ void draw_kernel(
     float color[] = {0, 0, 0};
     float accum = 1.0;
     float accum_weight = 0.0;
-
-    // direction calculation
-    float current_dir[3];
-    float _norm = 0.0f;
-    #pragma unroll
-    for(uint32_t _i=0; _i<3; ++_i){
-        current_dir[_i] = lefttop_pos[_i] + id_x * vec_dx[_i] + id_y * vec_dy[_i] - rays_o[_i];
-        _norm += current_dir[_i] * current_dir[_i];
-    }
-    _norm = sqrtf(_norm);
-    #pragma unroll
-    for(uint32_t _i=0; _i<3;++_i){
-        current_dir[_i] = current_dir[_i] / (_norm + 1e-7);
-    }
-    float SH[9];
-    if(use_sh_coeff){
-        calc_sh(9, current_dir, SH);
-    }
-
-    __shared__ float _gaussian_pos[SMSIZE*2];
-    __shared__ float _gaussian_rgb_coeff[SMSIZE*D];
-    __shared__ float _gaussian_opa[SMSIZE*1];
-    __shared__ float _gaussian_cov[SMSIZE*4];
 
     // double current_prob = 0.0;
     // double _a, _b, _c, _d, _x, _y, det;
@@ -803,10 +723,9 @@ __global__ void draw_kernel(
             _gaussian_pos[i*2 + 0] = gaussian_pos[(start_idx + i_loadings*SMSIZE + i)*3 + 0];
             _gaussian_pos[i*2 + 1] = gaussian_pos[(start_idx + i_loadings*SMSIZE + i)*3 + 1];
             // rgb
-            #pragma unroll
-            for(int _channel=0; _channel<D; ++_channel){
-                _gaussian_rgb_coeff[i*D + _channel] = gaussian_rgb_coeff[(start_idx + i_loadings*SMSIZE + i)*D + _channel];
-            }
+            _gaussian_rgb[i*3 + 0] = gaussian_rgb[(start_idx + i_loadings*SMSIZE + i)*3 + 0];
+            _gaussian_rgb[i*3 + 1] = gaussian_rgb[(start_idx + i_loadings*SMSIZE + i)*3 + 1];
+            _gaussian_rgb[i*3 + 2] = gaussian_rgb[(start_idx + i_loadings*SMSIZE + i)*3 + 2];
             // opa
             _gaussian_opa[i] = gaussian_opa[start_idx + i_loadings*SMSIZE + i];
             // cov
@@ -848,31 +767,9 @@ __global__ void draw_kernel(
             }
             weight = alpha * accum;
             // printf("a: %f, b: %f, c: %f, d: %f, x: %f, y: %f, det: %f, current_prob: %f, weight: %f\n", _a, _b, _c, _d, _x, _y, det, current_prob, weight);
-            // color related
-
-            if(use_sh_coeff){
-                float current_gaussian_rgb[] = {0.0, 0.0, 0.0};
-                #pragma unroll
-                for(uint32_t _i_channel=0; _i_channel<3; ++_i_channel){
-                    #pragma unroll
-                    for(uint32_t _i_sh=0; _i_sh<9; ++_i_sh){
-                        current_gaussian_rgb[_i_channel] += SH[_i_sh] * _gaussian_rgb_coeff[i*27 + _i_channel*9 + _i_sh];
-                    }
-                }
-                #pragma unroll
-                for(uint32_t _i_channel=0; _i_channel<3; ++_i_channel){
-                    current_gaussian_rgb[_i_channel] = 1./(1 + __expf(-current_gaussian_rgb[_i_channel]));
-                }
-                color[0] += current_gaussian_rgb[0] * weight;
-                color[1] += current_gaussian_rgb[1] * weight;
-                color[2] += current_gaussian_rgb[2] * weight;
-            }
-            else{
-                color[0] += _gaussian_rgb_coeff[i*3 + 0] * weight;
-                color[1] += _gaussian_rgb_coeff[i*3 + 1] * weight;
-                color[2] += _gaussian_rgb_coeff[i*3 + 2] * weight;
-            }
-
+            color[0] += _gaussian_rgb[i*3 + 0] * weight;
+            color[1] += _gaussian_rgb[i*3 + 1] * weight;
+            color[2] += _gaussian_rgb[i*3 + 2] * weight;
             accum_weight += weight;
             accum *= (1-alpha);
         }
@@ -898,12 +795,7 @@ void draw(
     float focal_y,
     bool weight_normalize,
     bool sigmoid,
-    bool fast,
-    torch::Tensor rays_o,
-    torch::Tensor lefttop_pos,
-    torch::Tensor vec_dx,
-    torch::Tensor vec_dy,
-    bool use_sh_coeff
+    bool fast
 ){
     uint32_t h = res.size(0);
     uint32_t w = res.size(1); 
@@ -911,10 +803,8 @@ void draw(
     uint32_t gridsize_y = DIV_ROUND_UP(h, 16);
     dim3 gridsize(gridsize_x, gridsize_y, 1);
     dim3 blocksize(16, 16, 1);
-    uint32_t SMSIZE;
-    SMSIZE = use_sh_coeff ? 340 : 1200;
-    if(use_sh_coeff){
-        draw_kernel<340, float, 27><<<gridsize, blocksize>>>(
+    if(fast){
+        draw_kernel<1200, float><<<gridsize, blocksize>>>(
             gaussian_pos.data_ptr<float>(),
             gaussian_rgb.data_ptr<float>(),
             gaussian_opa.data_ptr<float>(),
@@ -927,16 +817,11 @@ void draw(
             h,
             weight_normalize,
             sigmoid,
-            fast,
-            rays_o.data_ptr<float>(),
-            lefttop_pos.data_ptr<float>(),
-            vec_dx.data_ptr<float>(),
-            vec_dy.data_ptr<float>(),
-            use_sh_coeff
+            fast
         );
     }
     else{
-        draw_kernel<1200, float, 3><<<gridsize, blocksize>>>(
+        draw_kernel<1200, double><<<gridsize, blocksize>>>(
             gaussian_pos.data_ptr<float>(),
             gaussian_rgb.data_ptr<float>(),
             gaussian_opa.data_ptr<float>(),
@@ -949,12 +834,7 @@ void draw(
             h,
             weight_normalize,
             sigmoid,
-            fast,
-            rays_o.data_ptr<float>(),
-            lefttop_pos.data_ptr<float>(),
-            vec_dx.data_ptr<float>(),
-            vec_dy.data_ptr<float>(),
-            use_sh_coeff
+            fast
         );
     }
 }
@@ -975,12 +855,7 @@ void draw_backward(
     float focal_y,
     bool weight_normalize,
     bool sigmoid,
-    bool fast,
-    torch::Tensor rays_o,
-    torch::Tensor lefttop_pos,
-    torch::Tensor vec_dx,
-    torch::Tensor vec_dy,
-    bool use_sh_coeff
+    bool fast
 ){
     uint32_t h = output.size(0);
     uint32_t w = output.size(1); 
@@ -988,8 +863,8 @@ void draw_backward(
     uint32_t gridsize_y = DIV_ROUND_UP(h, 16);
     dim3 gridsize(gridsize_x, gridsize_y, 1);
     dim3 blocksize(16, 16, 1);
-    if(use_sh_coeff){
-        draw_backward_kernel<160, float, 27><<<gridsize, blocksize>>>(
+    if(fast){
+        draw_backward_kernel<512, float><<<gridsize, blocksize>>>(
             gaussian_pos.data_ptr<float>(),
             gaussian_rgb.data_ptr<float>(),
             gaussian_opa.data_ptr<float>(),
@@ -1007,16 +882,11 @@ void draw_backward(
             h,
             weight_normalize,
             sigmoid,
-            fast,
-            rays_o.data_ptr<float>(),
-            lefttop_pos.data_ptr<float>(),
-            vec_dx.data_ptr<float>(),
-            vec_dy.data_ptr<float>(),
-            use_sh_coeff
+            fast
         );
     }
     else{
-        draw_backward_kernel<500, float, 3><<<gridsize, blocksize>>>(
+        draw_backward_kernel<512, double><<<gridsize, blocksize>>>(
             gaussian_pos.data_ptr<float>(),
             gaussian_rgb.data_ptr<float>(),
             gaussian_opa.data_ptr<float>(),
@@ -1034,15 +904,9 @@ void draw_backward(
             h,
             weight_normalize,
             sigmoid,
-            fast,
-            rays_o.data_ptr<float>(),
-            lefttop_pos.data_ptr<float>(),
-            vec_dx.data_ptr<float>(),
-            vec_dy.data_ptr<float>(),
-            use_sh_coeff
+            fast
         );
     }
-    
 }
 
 __device__ void world_to_camera(

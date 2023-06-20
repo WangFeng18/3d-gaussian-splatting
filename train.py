@@ -9,14 +9,15 @@ import cv2
 from torchgeometry.losses import SSIM
 from torchmetrics.functional import peak_signal_noise_ratio as psnr_func
 from utils import Timer
-from gui import NeRFGUI
+# from gui import NeRFGUI
+from visergui import ViserViewer
 
 class Trainer:
     def __init__(self, gaussian_splatter, opt):
         self.gaussian_splatter = gaussian_splatter
         self.opt = opt
         self.lr_opa = opt.lr * opt.lr_factor_for_opa
-        self.lr_rgb = opt.lr * 1
+        self.lr_rgb = opt.lr * opt.lr_factor_for_rgb
         self.lr_pos = opt.lr * 1
         self.lr_quat = opt.lr * opt.lr_factor_for_quat
         self.lr_scale = opt.lr * opt.lr_factor_for_scale
@@ -60,19 +61,22 @@ class Trainer:
             betas=(0.9, 0.99),
         )
 
-        self.n_cameras = len(gaussian_splatter.imgs)
+        if not opt.test:
+            self.n_cameras = len(gaussian_splatter.imgs)
+            self.test_split = np.arange(0, self.n_cameras, 8)
+            self.train_split = np.array(list(set(np.arange(0, self.n_cameras, 1)) - set(self.test_split)))
 
         self.ssim_criterion = SSIM(window_size=11, reduction='mean')
         self.l1_losses = np.zeros(opt.n_history_track)
         self.psnrs = np.zeros(opt.n_history_track)
         self.ssim_losses = np.zeros(opt.n_history_track)
 
-        self.test_split = np.arange(0, self.n_cameras, 8)
-        self.train_split = np.array(list(set(np.arange(0, self.n_cameras, 1)) - set(self.test_split)))
+        self.grad_counter = 0
         self.clear_grad()
 
     def clear_grad(self):
         self.accum_max_grad = torch.zeros_like(self.gaussian_splatter.gaussian_3ds.pos)
+        self.grad_counter = 0
     
     def train_step(self, i_iter, bar):
         opt = self.opt
@@ -126,7 +130,14 @@ class Trainer:
 
         if _adaptive_control_accum_start:
             self.clear_grad()
-        self.accum_max_grad = torch.max(self.gaussian_splatter.gaussian_3ds.pos.grad, self.accum_max_grad)
+        # self.accum_max_grad = torch.max(self.gaussian_splatter.gaussian_3ds.pos.grad, self.accum_max_grad)
+        if opt.grad_accum_method == "mean":
+            self.accum_max_grad += self.gaussian_splatter.gaussian_3ds.pos.grad.abs()
+            self.grad_counter += 1
+        else:
+            assert opt.grad_accum_method == "max"
+            self.accum_max_grad = torch.max(self.gaussian_splatter.gaussian_3ds.pos.grad.abs(), self.accum_max_grad)
+            self.grad_counter = 1
 
         if _adaptive_control:
             # adaptive control for gaussians
@@ -134,13 +145,15 @@ class Trainer:
             # adaptive_number = (self.accum_max_grad.abs().max(-1)[0] > 0.0002).sum()
             # adaptive_ratio = adaptive_number / grad[..., 0].numel()
             self.gaussian_splatter.gaussian_3ds.adaptive_control(
-                self.accum_max_grad, 
+                self.accum_max_grad/self.grad_counter, 
                 taus=opt.split_thresh, 
                 delete_thresh=opt.delete_thresh, 
                 scale_activation=gaussian_splatter.scale_activation,
+                grad_thresh=opt.grad_thresh,
                 use_clone=opt.use_clone,     
                 use_split=opt.use_split,
                 grad_aggregation=opt.grad_aggregation,
+                clone_dt=opt.clone_dt,
             )
             # optimizer = torch.optim.Adam(gaussian_splatter.parameters(), lr=lr_lambda(0), betas=(0.9, 0.99))
             self.optimizer = torch.optim.Adam([
@@ -254,47 +267,55 @@ class Trainer:
 if __name__ == "__main__":
     # CUDA_VISIBLE_DEVICES=2 python train.py --scale_activation exp --lr 0.003 --opa_init_value 0.3 --n_iters_warmup 300 --lr_factor_for_opa 10 --n_adaptive_control 20000000
     # PSNR/SSIM 23.17/0.2054
+    # python train.py --scale_activation abs --lr 0.003 --opa_init_value 0.3 --n_iters_warmup 300 --lr_factor_for_opa 10 --n_adaptive_control 200 --cudaculling 1 --tile_culling_prob_thresh 0.05 --fast_drawing 1 --exp abs_oiv3_acsplit_offdecay --use_clone 0 --use_split 1 --grad_accum_iter 20 --lr_decay exp
+    # PSNR/SSIM 24.0421/0.1637
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n_iters", type=int, default=10000)
-    parser.add_argument("--n_iters_warmup", type=int, default=200)
+    parser.add_argument("--n_iters", type=int, default=7001)
+    parser.add_argument("--n_iters_warmup", type=int, default=300)
     parser.add_argument("--n_iters_test", type=int, default=200)
     parser.add_argument("--n_history_track", type=int, default=100)
     parser.add_argument("--n_save_train_img", type=int, default=100)
-    parser.add_argument("--n_adaptive_control", type=int, default=200)
+    parser.add_argument("--n_adaptive_control", type=int, default=100)
     parser.add_argument("--render_downsample", type=int, default=4)
     parser.add_argument("--jacobian_track", type=int, default=0)
     parser.add_argument("--data", type=str, default="garden")
     parser.add_argument("--scale_init_value", type=float, default=1)
-    parser.add_argument("--opa_init_value", type=float, default=0.6)
+    parser.add_argument("--opa_init_value", type=float, default=0.3)
     parser.add_argument("--tile_culling_dist_thresh", type=float, default=0.5)
     parser.add_argument("--tile_culling_prob_thresh", type=float, default=0.05)
     parser.add_argument("--tile_culling_method", type=str, default="prob2", choices=["dist", "prob", "prob2"])
 
     # learning rate
-    parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument("--lr", type=float, default=0.003)
     parser.add_argument("--lr_factor_for_scale", type=float, default=1)
-    parser.add_argument("--lr_factor_for_opa", type=float, default=1)
+    parser.add_argument("--lr_factor_for_rgb", type=float, default=1)
+    parser.add_argument("--lr_factor_for_opa", type=float, default=10)
     parser.add_argument("--lr_factor_for_quat", type=float, default=1)
-    parser.add_argument("--lr_decay", type=str, default="none", choices=["none", "official", "exp"])
+    parser.add_argument("--lr_decay", type=str, default="exp", choices=["none", "official", "exp"])
 
     parser.add_argument("--delete_thresh", type=float, default=1.5)
     parser.add_argument("--n_opa_reset", type=int, default=10000000)
     parser.add_argument("--split_thresh", type=float, default=0.05)
     parser.add_argument("--ssim_weight", type=float, default=0.2)
     parser.add_argument("--debug", type=int, default=1)
+    parser.add_argument("--use_sh_coeff", type=int, default=0)
     parser.add_argument("--scale_reg", type=float, default=0)
     parser.add_argument("--cudaculling", type=int, default=1)
     parser.add_argument("--adaptive_lr", type=int, default=0)
     parser.add_argument("--seed", type=int, default=2023)
     parser.add_argument("--ckpt", type=str, default="")
     parser.add_argument("--scale_activation", type=str, default="abs", choices=["abs", "exp"])
-    parser.add_argument("--fast_drawing", type=int, default=0)
+    parser.add_argument("--fast_drawing", type=int, default=1)
     parser.add_argument("--exp", type=str, default="default")
 
     # adaptive control
-    parser.add_argument("--grad_accum_iters", type=int, default=1)
-    parser.add_argument("--use_clone", type=int, default=1)
+    # parser.add_argument("--grad_accum_iters", type=int, default=20)
+    parser.add_argument("--grad_accum_iters", type=int, default=20)
+    parser.add_argument("--grad_accum_method", type=str, default="max", choices=["mean", "max"])
+    parser.add_argument("--grad_thresh", type=float, default=0.0002)
+    parser.add_argument("--use_clone", type=int, default=0)
     parser.add_argument("--use_split", type=int, default=1)
+    parser.add_argument("--clone_dt", type=float, default=0.01)
     parser.add_argument("--grad_aggregation", type=str, default="max", choices=["max", "mean"])
 
     # GUI related
@@ -305,7 +326,8 @@ if __name__ == "__main__":
     parser.add_argument("--radius", default=5.0, type=float)
     parser.add_argument('--fovy', type=float, default=50, help="default GUI camera fovy")
     parser.add_argument('--max_spp', type=int, default=1, help="GUI rendering max sample per pixel")
-    parser.add_argument('--dt_gamma', type=float, default=1/128, help="dt_gamma (>=0) for adaptive ray marching. set to 0 to disable, >0 to accelerate rendering (but usually with worse quality)")
+    #parser.add_argument('--dt_gamma', type=float, default=1/128, help="dt_gamma (>=0) for adaptive ray marching. set to 0 to disable, >0 to accelerate rendering (but usually with worse quality)")
+    parser.add_argument('--dt_gamma', type=float, default=0, help="dt_gamma (>=0) for adaptive ray marching. set to 0 to disable, >0 to accelerate rendering (but usually with worse quality)")
     parser.add_argument('--max_steps', type=int, default=1024, help="max num steps sampled per ray (only valid when using --cuda_ray)")
     parser.add_argument('--bound', type=float, default=10, help="assume the scene is bounded in box[-bound, bound]^3, if > 1, will invoke adaptive ray marching.")
 
@@ -330,6 +352,7 @@ if __name__ == "__main__":
         img_path,
         render_weight_normalize=False, 
         render_downsample=opt.render_downsample,
+        use_sh_coeff=opt.use_sh_coeff,
         scale_init_value=opt.scale_init_value,
         opa_init_value=opt.opa_init_value,
         tile_culling_method=opt.tile_culling_method,
@@ -340,12 +363,17 @@ if __name__ == "__main__":
         cudaculling=opt.cudaculling,
         load_ckpt=opt.ckpt,
         fast_drawing=opt.fast_drawing,
+        test=opt.test,
         #jacobian_calc="torch",
     )
     trainer = Trainer(gaussian_splatter, opt)
     if opt.gui:
         assert opt.test == 1
-        gui = NeRFGUI(opt, trainer)
-        gui.render()
+        # gui = NeRFGUI(opt, trainer)
+        # gui.render()
+        gui = ViserViewer(device=gaussian_splatter.device, viewer_port=6789)
+        gui.set_renderer(trainer)
+        while(True):
+            gui.update()
     else:
         trainer.train()

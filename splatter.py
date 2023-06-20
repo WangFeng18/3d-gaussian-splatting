@@ -126,7 +126,8 @@ class Gaussian3ds(nn.Module):
         grad_thresh=0.0002,
         grad_aggregation="max",
         use_clone=True,
-        use_split=True
+        use_split=True,
+        clone_dt=0.01,
     ):
         # grad: B x 3
         # densification
@@ -172,7 +173,7 @@ class Gaussian3ds(nn.Module):
 
             if clone_mask.any() and use_clone:
                 cloned_pos = self.pos[clone_mask].clone().detach()
-                cloned_pos -= grad[clone_mask] * 0.01
+                cloned_pos -= grad[clone_mask] * clone_dt
                 cloned_rgb = self.rgb[clone_mask].clone().detach()
                 cloned_opa = self.opa[clone_mask].clone().detach()
                 cloned_quat = self.quat[clone_mask].clone().detach()
@@ -226,33 +227,26 @@ class Gaussian3ds(nn.Module):
     
     def project(self, rot, tran, near, jacobian_calc, scale_activation="abs"):
 
-        with Timer("        w2c"):
-            pos_cam_space = world_to_camera(self.pos, rot, tran)
-        with Timer("        c2i"):
-            pos_img_space = camera_to_image(pos_cam_space)
+        pos_cam_space = world_to_camera(self.pos, rot, tran)
+        pos_img_space = camera_to_image(pos_cam_space)
 
-        with Timer("        jacobian"):
-            if jacobian_calc == "cuda":
-                jacobian = torch.empty(pos_cam_space.shape[0], 3, 3, device=self.pos.device)
-                gaussian.jacobian(pos_cam_space, jacobian)
-            else:
-                jacobian = jacobian_torch(pos_cam_space)
-        with Timer("        cov1"):
-            gaussian_3d_cov = self.get_gaussian_3d_cov(scale_activation=scale_activation)
-            # JW = torch.einsum("bij,bjk->bik", jacobian, rot.unsqueeze(dim=0))
-        with Timer("        cov2"):
-            JW = torch.matmul(jacobian, rot.unsqueeze(dim=0))
-        with Timer("        cov3"):
-            JWC = torch.bmm(JW, gaussian_3d_cov)
-            gaussian_2d_cov = torch.bmm(JWC, JW.permute(0,2,1))[:, :2, :2]
+        if jacobian_calc == "cuda":
+            jacobian = torch.empty(pos_cam_space.shape[0], 3, 3, device=self.pos.device)
+            gaussian.jacobian(pos_cam_space, jacobian)
+        else:
+            jacobian = jacobian_torch(pos_cam_space)
+        gaussian_3d_cov = self.get_gaussian_3d_cov(scale_activation=scale_activation)
+        # JW = torch.einsum("bij,bjk->bik", jacobian, rot.unsqueeze(dim=0))
+        JW = torch.matmul(jacobian, rot.unsqueeze(dim=0))
+        JWC = torch.bmm(JW, gaussian_3d_cov)
+        gaussian_2d_cov = torch.bmm(JWC, JW.permute(0,2,1))[:, :2, :2]
 
-        with Timer("        last"):
-            gaussian_3ds_image_space = Gaussian3ds(
-                pos=pos_img_space,
-                rgb=self.rgb.sigmoid(),
-                opa=self.opa.sigmoid(),
-                cov=gaussian_2d_cov,
-            )
+        gaussian_3ds_image_space = Gaussian3ds(
+            pos=pos_img_space,
+            rgb=self.rgb.sigmoid(),
+            opa=self.opa.sigmoid(),
+            cov=gaussian_2d_cov,
+        )
         return gaussian_3ds_image_space
         
 class Tiles:
@@ -306,6 +300,24 @@ class Tiles:
     def __len__(self):
         return self.tiles_top.shape[0]
 
+class RayInfo:
+    def __init__(self, w2c, tran, H, W, focal_x, focal_y):
+        self.w2c = w2c
+        self.c2w = torch.inverse(w2c)
+        self.tran = tran
+        self.H = H
+        self.W = W
+        self.focal_x = focal_x
+        self.focal_y = focal_y
+        self.rays_o = - self.c2w @ tran
+        
+        lefttop_cam = torch.Tensor([(-W/2 + 0.5)/focal_x, (-H/2 + 0.5)/focal_y, 1.0]).to(self.w2c.device)
+        dx_cam = torch.Tensor([1./focal_x, 0, 0]).to(self.w2c.device)
+        dy_cam = torch.Tensor([0, 1./focal_y, 0]).to(self.w2c.device)
+        self.lefttop = self.c2w @ (lefttop_cam - tran)
+        self.dx = self.c2w @ dx_cam
+        self.dy = self.c2w @ dy_cam
+
 class Splatter(nn.Module):
     def __init__(self, 
         colmap_path, 
@@ -327,6 +339,7 @@ class Splatter(nn.Module):
         load_ckpt=None,
         debug_align=False,
         fast_drawing=False,
+        test=False,
     ):
         super().__init__()
         self.device = torch.device("cuda")
@@ -348,7 +361,9 @@ class Splatter(nn.Module):
         self.cameras = read_cameras_binary(os.path.join(colmap_path,"cameras.bin"))
         self.images_info = read_images_binary(os.path.join(colmap_path,"images.bin"))
         self.image_path = image_path
-        self.parse_imgs()
+        self.test = test
+        if not self.test:
+            self.parse_imgs()
         # self.vis_culling = Vis()
         self.tic = torch.cuda.Event(enable_timing=True)
         self.toc = torch.cuda.Event(enable_timing=True)
@@ -357,12 +372,16 @@ class Splatter(nn.Module):
         _rgbs = []
         for pid, point in self.points3d.items():
             _points.append(torch.from_numpy(point.xyz))
-            _rgbs.append(inverse_sigmoid_torch(torch.from_numpy(point.rgb/255.)))
+            if self.use_sh_coeff:
+                _rgbs.append(inverse_sigmoid_torch(torch.from_numpy(point.rgb/255.)))
+            else:
+                _rgbs.append(inverse_sigmoid_torch(torch.from_numpy(point.rgb/255.)))
             # _rgbs.append(torch.from_numpy(point.rgb))
             # self.vis_culling.add_item(point.id, point.xyz, point.rgb, point.error, point.image_ids, point.point2D_idxs)
         rgb = torch.stack(_rgbs).to(torch.float32).to(self.device) # B x 3
         if self.use_sh_coeff:
             rgb = initialize_sh(rgb)
+            # rgb = torch.zeros(rgb.shape[0], 27).to(torch.float32).to(self.device)
         
         _pos=torch.stack(_points).to(torch.float32).to(self.device)
         if load_ckpt is None:
@@ -402,7 +421,8 @@ class Splatter(nn.Module):
             self.gaussian_3ds.quat = nn.Parameter(ckpt["quat"])
             self.gaussian_3ds.scale = nn.Parameter(ckpt["scale"])
         self.current_camera = None
-        self.set_camera(0)
+        if not self.test:
+            self.set_camera(0)
     
     def parse_imgs(self):
         img_ids = sorted([im.id for im in self.images_info.values()])
@@ -436,7 +456,7 @@ class Splatter(nn.Module):
 
     def set_camera(self, idx, extrinsics=None, intrinsics=None):
         if idx is None:
-            print(extrinsics)
+            # print(extrinsics)
             self.current_w2c_rot = torch.from_numpy(extrinsics["rot"]).to(torch.float32).to(self.device)
             self.current_w2c_tran = torch.from_numpy(extrinsics["tran"]).to(torch.float32).to(self.device)
             self.current_w2c_quat = None
@@ -455,7 +475,6 @@ class Splatter(nn.Module):
                 self.device
             )
             self.tile_info_cpp = self.tile_info.create_tiles()
-            return 
         else:
             with Timer("    set image"):
                 self.current_w2c_quat = self.w2c_quats[idx]
@@ -473,8 +492,15 @@ class Splatter(nn.Module):
                     print(focal_y)
                     self.tile_info = Tiles(math.ceil(width), math.ceil(height), focal_x, focal_y, self.device)
                     self.tile_info_cpp = self.tile_info.create_tiles()
-        # print("current_camera info")
-        # print(self.current_camera)
+
+        self.ray_info = RayInfo(
+            w2c=self.current_w2c_rot, 
+            tran=self.current_w2c_tran, 
+            H=self.tile_info.padded_height, 
+            W=self.tile_info.padded_width, 
+            focal_x=self.tile_info.focal_x, 
+            focal_y=self.tile_info.focal_y
+        )
 
     def project_and_culling(self):
         # project 3D to 2D
@@ -482,10 +508,6 @@ class Splatter(nn.Module):
         # self.tic.record()
         if self.cudaculling:
             with Timer(" frustum cuda"):
-                # self.gaussian_3ds.rgb = self.gaussian_3ds.rgb.sigmoid()
-                # self.gaussian_3ds.opa = self.gaussian_3ds.opa.sigmoid()
-                # self.gaussian_3ds.quat = self.gaussian_3ds.quat / self.gaussian_3ds.quat.norm(dim=-1, keepdim=True)
-                # self.gaussian_3ds.scale = self.gaussian_3ds.scale.abs()+1e-5
                 normed_quat = (self.gaussian_3ds.quat/self.gaussian_3ds.quat.norm(dim=1, keepdim=True))
                 if self.scale_activation == "abs":
                     normed_scale = self.gaussian_3ds.scale.abs()+1e-4
@@ -506,10 +528,9 @@ class Splatter(nn.Module):
                 self.culling_gaussian_3d_image_space = Gaussian3ds(
                     pos=_pos[_culling_mask.bool()],
                     cov=_cov[_culling_mask.bool()],
-                    rgb=self.gaussian_3ds.rgb[_culling_mask.bool()].sigmoid(),
+                    rgb=self.gaussian_3ds.rgb[_culling_mask.bool()] if self.use_sh_coeff else self.gaussian_3ds.rgb[_culling_mask.bool()].sigmoid(),
                     opa=self.gaussian_3ds.opa[_culling_mask.bool()].sigmoid(),
                 )
-                # print(len(self.culling_gaussian_3d_image_space.pos))
         else:
             with Timer("culling 1"):
                 gaussian_3ds_pos_camera_space = world_to_camera(self.gaussian_3ds.pos, self.current_w2c_rot, self.current_w2c_tran)
@@ -530,19 +551,20 @@ class Splatter(nn.Module):
                 )
         
     def render(self, out_write=True):
+        if len(self.culling_gaussian_3d_image_space.pos) == 0:
+            return torch.zeros(self.tile_info.padded_height, self.tile_info.padded_width, 3, device=self.device, dtype=torch.float32)
         # self.tic.record()
         with Timer("     culling tiles", debug=self.debug):
             tile_n_point = torch.zeros(len(self.tile_info), device=self.device, dtype=torch.int32)
-            # print("***{}***".format(len(self.culling_gaussian_3d_image_space.pos)//10))
-            tile_gaussian_list = torch.ones(len(self.tile_info), len(self.culling_gaussian_3d_image_space.pos)//10, device=self.device, dtype=torch.int32) * -1
+            # MAXP = len(self.culling_gaussian_3d_image_space.pos)//10
+            MAXP = len(self.culling_gaussian_3d_image_space.pos)//20
+            tile_gaussian_list = torch.ones(len(self.tile_info), MAXP, device=self.device, dtype=torch.int32) * -1
             _method_config = {"dist": 0, "prob": 1, "prob2": 2}
             gaussian.calc_tile_list(
                     self.culling_gaussian_3d_image_space._tocpp(), 
                     self.tile_info_cpp,
                     tile_n_point,
                     tile_gaussian_list,
-                    # (self.tile_info.tile_geo_length/1.0) ** 2,
-                    # (self.tile_info.tile_geo_length/0.5) ** 2, training
                     (self.tile_info.tile_geo_length_x/self.tile_culling_dist_thresh) ** 2 if self.tile_culling_method == "dist" else self.tile_culling_prob_thresh,
                     _method_config[self.tile_culling_method],
                     self.tile_info.tile_geo_length_x,
@@ -551,9 +573,11 @@ class Splatter(nn.Module):
                     self.tile_info.n_tile_y,
                     self.tile_info.leftmost,
                     self.tile_info.topmost,
-                    # 0.01,
             )
-            # print(tile_gaussian_list.sum())
+            tile_n_point = torch.min(tile_n_point, torch.ones_like(tile_n_point)*MAXP)
+
+        if tile_n_point.sum() == 0:
+            return torch.zeros(self.tile_info.padded_height, self.tile_info.padded_width, 3, device=self.device, dtype=torch.float32)
             
         with Timer("     gather culled tiles", debug=self.debug):
             gathered_list = torch.empty(tile_n_point.sum(), dtype=torch.int32, device=self.device)
@@ -593,7 +617,11 @@ class Splatter(nn.Module):
                 self.render_weight_normalize,
                 False,
                 self.use_sh_coeff,
-                self.fast_drawing
+                self.fast_drawing,
+                self.ray_info.rays_o,
+                self.ray_info.lefttop,
+                self.ray_info.dx,
+                self.ray_info.dy,
             ) 
 
         with Timer("    write out", debug=self.debug):
@@ -604,8 +632,6 @@ class Splatter(nn.Module):
         return rendered_image
 
     def forward(self, camera_id=None, extrinsics=None, intrinsics=None):
-        # print(self.gaussian_3ds.opa.max())
-        # print(self.gaussian_3ds.opa.min())
         with Timer("forward", debug=self.debug):
             with Timer("set camera"):
                 self.set_camera(camera_id, extrinsics, intrinsics)
@@ -616,6 +642,8 @@ class Splatter(nn.Module):
             with Timer("crop", debug=self.debug):
                 padded_render_img = torch.clamp(padded_render_img, 0, 1)
                 ret = self.tile_info.crop(padded_render_img)
+        
+        Timer.show_recorder()
         return ret
 
 if __name__ == "__main__":
@@ -637,23 +665,3 @@ if __name__ == "__main__":
     test.forward(camera_id=0)
     loss = (test.ground_truth - test.forward(camera_id=0)).abs().mean()
     loss.backward()
-
-    pos_grad = test.gaussian_3ds.pos.grad
-    print(pos_grad.mean(), pos_grad.max())
-
-    rgb_grad = test.gaussian_3ds.rgb.grad
-    print(rgb_grad.mean(), rgb_grad.max())
-
-    opa_grad = test.gaussian_3ds.opa.grad
-    print(opa_grad.mean(), opa_grad.max())
-
-    quat_grad = test.gaussian_3ds.quat.grad
-    print(quat_grad.mean(), quat_grad.max())
-
-    scale_grad = test.gaussian_3ds.scale.grad
-    print(scale_grad.mean(), scale_grad.max())
-
-    # print(test.culling_gaussian_3d_image_space.rgb.mean(), test.culling_gaussian_3d_image_space.rgb.max())
-    # print(test.culling_gaussian_3d_image_space.opa.mean(), test.culling_gaussian_3d_image_space.opa.max())
-    # print(test.culling_gaussian_3d_image_space.cov.mean(), test.culling_gaussian_3d_image_space.cov.max())
-    # print(test.culling_gaussian_3d_image_space.pos.mean(), test.culling_gaussian_3d_image_space.pos.max())
