@@ -155,8 +155,7 @@ class ViserViewer:
                 except RuntimeError as e:
                     print(e)
                     continue
-                with Timer("[[[[[]]]]]]]]set background"):
-                    client.set_background_image(out, format="jpeg")
+                client.set_background_image(out, format="jpeg")
                 self.debug_idx += 1
                 # if self.debug_idx % 100 == 0:
                 #     cv2.imwrite(

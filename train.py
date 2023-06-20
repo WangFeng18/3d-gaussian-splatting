@@ -288,7 +288,7 @@ if __name__ == "__main__":
     # learning rate
     parser.add_argument("--lr", type=float, default=0.003)
     parser.add_argument("--lr_factor_for_scale", type=float, default=1)
-    parser.add_argument("--lr_factor_for_rgb", type=float, default=1)
+    parser.add_argument("--lr_factor_for_rgb", type=float, default=10)
     parser.add_argument("--lr_factor_for_opa", type=float, default=10)
     parser.add_argument("--lr_factor_for_quat", type=float, default=1)
     parser.add_argument("--lr_decay", type=str, default="exp", choices=["none", "official", "exp"])
@@ -310,9 +310,9 @@ if __name__ == "__main__":
 
     # adaptive control
     # parser.add_argument("--grad_accum_iters", type=int, default=20)
-    parser.add_argument("--grad_accum_iters", type=int, default=20)
+    parser.add_argument("--grad_accum_iters", type=int, default=50)
     parser.add_argument("--grad_accum_method", type=str, default="max", choices=["mean", "max"])
-    parser.add_argument("--grad_thresh", type=float, default=0.0002)
+    parser.add_argument("--grad_thresh", type=float, default=0.0001)
     parser.add_argument("--use_clone", type=int, default=0)
     parser.add_argument("--use_split", type=int, default=1)
     parser.add_argument("--clone_dt", type=float, default=0.01)
