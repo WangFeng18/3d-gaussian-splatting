@@ -490,7 +490,8 @@ class Splatter(nn.Module):
                     focal_y = self.current_camera.params[1] / self.render_downsample
                     print(focal_x)
                     print(focal_y)
-                    self.tile_info = Tiles(round(width), round(height), focal_x, focal_y, self.device)
+                    # breakpoint()
+                    self.tile_info = Tiles(int(self.ground_truth.shape[1]), int(self.ground_truth.shape[0]), focal_x, focal_y, self.device)
                     self.tile_info_cpp = self.tile_info.create_tiles()
 
         self.ray_info = RayInfo(
