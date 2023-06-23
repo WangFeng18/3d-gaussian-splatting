@@ -266,7 +266,6 @@ class Tiles:
         # output: height x width x 3
         top = int(self.padded_height - self.height)//2 
         left = int(self.padded_width - self.width)//2 
-        #return image[top:top+int(self.height), left:left+int(self.width), :]
         return image[top:top+int(self.height), left:left+int(self.width), :]
     
     def create_tiles(self):
@@ -490,7 +489,6 @@ class Splatter(nn.Module):
                     focal_y = self.current_camera.params[1] / self.render_downsample
                     print(focal_x)
                     print(focal_y)
-                    # breakpoint()
                     self.tile_info = Tiles(int(self.ground_truth.shape[1]), int(self.ground_truth.shape[0]), focal_x, focal_y, self.device)
                     self.tile_info_cpp = self.tile_info.create_tiles()
 
