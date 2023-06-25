@@ -15,7 +15,7 @@ from einops import repeat
 from renderer import draw, trunc_exp, global_culling, world2camera_func
 from tqdm import tqdm
 import argparse
-
+from pykdtree.kdtree import KDTree
     
 def world_to_camera(points, rot, tran):
     # r = torch.empty_like(points)
@@ -386,11 +386,19 @@ class Splatter(nn.Module):
         
         _pos=torch.stack(_points).to(torch.float32).to(self.device)
         if load_ckpt is None:
-            mean_min_three_dis = []
-            for i_pos in tqdm(range(_pos.shape[0])):
-                _r = (_pos[i_pos:i_pos+1] - _pos).norm(dim=-1).sort(dim=-1)[0][1:4].mean().item()
-                mean_min_three_dis.append(_r)
-            mean_min_three_dis = torch.Tensor(mean_min_three_dis).to(torch.float32) * scale_init_value
+            with Timer("  distance calc", debug=True):
+                _pos_np = _pos.cpu().numpy()
+                kd_tree = KDTree(_pos_np)
+                dist, idx = kd_tree.query(_pos_np, k=4)
+                mean_min_three_dis = dist[:, 1:].mean(axis=1)
+                mean_min_three_dis = torch.Tensor(mean_min_three_dis).to(torch.float32) * scale_init_value
+            Timer.show_recorder()
+            
+            # mean_min_three_dis = []
+            # for i_pos in tqdm(range(_pos.shape[0])):
+            #     _r = (_pos[i_pos:i_pos+1] - _pos).norm(dim=-1).sort(dim=-1)[0][1:4].mean().item()
+            #     mean_min_three_dis.append(_r)
+            # mean_min_three_dis = torch.Tensor(mean_min_three_dis).to(torch.float32) * scale_init_value
 
             if scale_activation == "exp":
                 mean_min_three_dis = mean_min_three_dis.log()
