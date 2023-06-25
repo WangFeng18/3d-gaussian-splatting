@@ -39,4 +39,4 @@ The GUI is based on [Viser](https://github.com/nerfstudio-project/viser) and wri
 The transforms folder are from [Viser](https://github.com/nerfstudio-project/viser)
 
 ### Link
-Another good implementation for 3D gaussian splatting, by (Zilong Chen) [https://github.com/heheyas/gaussian_splatting_3d]
+Another good implementation for 3D gaussian splatting, by (Zilong Chen)[https://github.com/heheyas/gaussian_splatting_3d]
