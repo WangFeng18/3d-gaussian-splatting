@@ -154,6 +154,7 @@ class ViserViewer:
                     out = outputs["image"].cpu().detach().numpy().astype(np.float32)
                 except RuntimeError as e:
                     print(e)
+                    interval = 1
                     continue
                 client.set_background_image(out, format="jpeg")
                 self.debug_idx += 1

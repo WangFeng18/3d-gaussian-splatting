@@ -425,18 +425,6 @@ __device__ __inline__ void calc_sh(
     }
 }
 
-__device__ uint32_t find_min_active_lane_id(uint32_t active_mask){
-    uint32_t res = 0;
-    for(; res<32; ++res){
-        if(active_mask & 0x00000001 == 1){
-            return res;
-        }
-        active_mask = active_mask >> 1;
-    }
-    return res;
-}
-#define FULL_MASK 0xffffffff
-
 template<uint32_t SMSIZE, typename T, uint32_t D>
 __global__ void draw_backward_kernel(
     const float * gaussian_pos,
@@ -465,7 +453,6 @@ __global__ void draw_backward_kernel(
 ){
     uint32_t id_x = blockDim.x * blockIdx.x + threadIdx.x;
     uint32_t id_y = blockDim.y * blockIdx.y + threadIdx.y;
-    bool is_valid = !(id_x>=w || id_y>=h);
     if(id_x>=w || id_y>=h) return;
     uint32_t id_tile = blockIdx.x + blockIdx.y * gridDim.x;
     uint32_t start_idx = tile_n_point_accum[id_tile];
@@ -475,23 +462,21 @@ __global__ void draw_backward_kernel(
     uint32_t id_thread = threadIdx.x + threadIdx.y * blockDim.x;
     uint32_t blocksize = blockDim.x * blockDim.y;
 
-    uint32_t lane_id = id_thread % 32;
-
     // direction calculation
     float current_dir[3];
-    float SH[9];
     float _norm = 0.0f;
+    #pragma unroll
+    for(uint32_t _i=0; _i<3; ++_i){
+        current_dir[_i] = lefttop_pos[_i] + id_x * vec_dx[_i] + id_y * vec_dy[_i] - rays_o[_i];
+        _norm += current_dir[_i] * current_dir[_i];
+    }
+    _norm = sqrtf(_norm);
+    #pragma unroll
+    for(uint32_t _i=0; _i<3;++_i){
+        current_dir[_i] = current_dir[_i] / (_norm + 1e-7);
+    }
+    float SH[9];
     if(use_sh_coeff){
-        #pragma unroll
-        for(uint32_t _i=0; _i<3; ++_i){
-            current_dir[_i] = lefttop_pos[_i] + id_x * vec_dx[_i] + id_y * vec_dy[_i] - rays_o[_i];
-            _norm += current_dir[_i] * current_dir[_i];
-        }
-        _norm = sqrtf(_norm);
-        #pragma unroll
-        for(uint32_t _i=0; _i<3;++_i){
-            current_dir[_i] = current_dir[_i] / (_norm + 1e-7);
-        }
         calc_sh(9, current_dir, SH);
     }
 
@@ -578,7 +563,6 @@ __global__ void draw_backward_kernel(
             if(global_idx>=(end_idx-start_idx)||accum < 0.0001){
                 break;
             }
-
             _a = _gaussian_cov[i*4+0];
             _b = _gaussian_cov[i*4+1];
             _c = _gaussian_cov[i*4+2];
@@ -599,13 +583,7 @@ __global__ void draw_backward_kernel(
                 current_prob1 = exp(Pm / Pn);
             }
             current_prob = current_prob0 * current_prob1;
-
-            alpha = current_prob * _gaussian_opa[i];
-            // sigmoid + scale -> 0-1
-            if(sigmoid){
-                alpha = 2./(exp(-alpha)+1) - 1;
-            }
-
+            
             // gradient primitives for 2d gaussian
             T dPm_da = - (_y * _y);
             T dPm_db = _x * _y;
@@ -632,7 +610,12 @@ __global__ void draw_backward_kernel(
             // gradient w.r.t position (not _x, _y, with a minus)
             T dP_dx = current_prob / Pn * (2*_d*_x - _b*_y - _c*_y);
             T dP_dy = current_prob / Pn * (2*_a*_y - _b*_x - _c*_x);
-            
+
+            alpha = current_prob * _gaussian_opa[i];
+            // sigmoid + scale -> 0-1
+            if(sigmoid){
+                alpha = 2./(exp(-alpha)+1) - 1;
+            }
             weight = alpha * accum;
 
             float cur_point_color[] = {0.0, 0.0, 0.0};
@@ -663,47 +646,17 @@ __global__ void draw_backward_kernel(
 
             // grad w.r.t gaussian rgb
             if(use_sh_coeff){
-                float D0 = cur_grad_out[0]*weight*(cur_point_color[0]*(1-cur_point_color[0]));
-                float D1 = cur_grad_out[1]*weight*(cur_point_color[1]*(1-cur_point_color[1]));
-                float D2 = cur_grad_out[2]*weight*(cur_point_color[2]*(1-cur_point_color[2]));
                 #pragma unroll
                 for(uint32_t _i_sh=0; _i_sh<9; ++_i_sh){
-                    float grad_wrt_color[3];
-                    grad_wrt_color[0] = D0*SH[_i_sh];
-                    grad_wrt_color[1] = D1*SH[_i_sh];
-                    grad_wrt_color[2] = D2*SH[_i_sh];
-                    uint32_t active_mask = __activemask();
-                    uint32_t first_lane_id = find_min_active_lane_id(active_mask);
-                    #pragma unroll
-                    for (int offset = 16; offset > 0; offset /= 2){
-                        grad_wrt_color[0] += __shfl_down_sync(active_mask, grad_wrt_color[0], offset);
-                        grad_wrt_color[1] += __shfl_down_sync(active_mask, grad_wrt_color[1], offset);
-                        grad_wrt_color[2] += __shfl_down_sync(active_mask, grad_wrt_color[2], offset);
-                    }
-                    if(first_lane_id < 32 && lane_id == first_lane_id){
-                        atomicAdd(_grad_rgb_coeff+i*27+0+_i_sh, grad_wrt_color[0]);
-                        atomicAdd(_grad_rgb_coeff+i*27+9+_i_sh, grad_wrt_color[1]);
-                        atomicAdd(_grad_rgb_coeff+i*27+18+_i_sh, grad_wrt_color[2]);
-                    }
+                    atomicAdd(_grad_rgb_coeff+i*27+0+_i_sh, cur_grad_out[0]*weight*(cur_point_color[0]*(1-cur_point_color[0]))*SH[_i_sh]);
+                    atomicAdd(_grad_rgb_coeff+i*27+9+_i_sh, cur_grad_out[1]*weight*(cur_point_color[1]*(1-cur_point_color[1]))*SH[_i_sh]);
+                    atomicAdd(_grad_rgb_coeff+i*27+18+_i_sh, cur_grad_out[2]*weight*(cur_point_color[2]*(1-cur_point_color[2]))*SH[_i_sh]);
                 }
             }
             else{
-                float grad_wrt_color_0 = cur_grad_out[0]*weight;
-                float grad_wrt_color_1 = cur_grad_out[1]*weight;
-                float grad_wrt_color_2 = cur_grad_out[2]*weight;
-                uint32_t active_mask = __activemask();
-                uint32_t first_lane_id = find_min_active_lane_id(active_mask);
-                #pragma unroll
-                for (int offset = 16; offset > 0; offset /= 2){
-                    grad_wrt_color_0 += __shfl_down_sync(active_mask, grad_wrt_color_0, offset);
-                    grad_wrt_color_1 += __shfl_down_sync(active_mask, grad_wrt_color_1, offset);
-                    grad_wrt_color_2 += __shfl_down_sync(active_mask, grad_wrt_color_2, offset);
-                }
-                if(first_lane_id < 32 && lane_id == first_lane_id){
-                    atomicAdd(_grad_rgb_coeff+i*3+0, grad_wrt_color_0);
-                    atomicAdd(_grad_rgb_coeff+i*3+1, grad_wrt_color_1);
-                    atomicAdd(_grad_rgb_coeff+i*3+2, grad_wrt_color_2);
-                }
+                atomicAdd(_grad_rgb_coeff+i*3+0, cur_grad_out[0]*weight);
+                atomicAdd(_grad_rgb_coeff+i*3+1, cur_grad_out[1]*weight);
+                atomicAdd(_grad_rgb_coeff+i*3+2, cur_grad_out[2]*weight);
             }
 
             // grad w.r.t pos opa cov -> grad w.r.t alpha
@@ -724,52 +677,17 @@ __global__ void draw_backward_kernel(
             if(sigmoid){
                 d_alpha = d_alpha * (alpha + 1 - 0.5*(alpha+1)*(alpha+1));
             }
-
             // grad w.r.t opa
-            float grad_wrt_opa = (float)(d_alpha*current_prob);
-            uint32_t active_mask = __activemask();
-            uint32_t first_lane_id = find_min_active_lane_id(active_mask);
-            #pragma unroll
-            for (int offset = 16; offset > 0; offset /= 2){
-                grad_wrt_opa += __shfl_down_sync(active_mask, grad_wrt_opa, offset);
-            }
-            if(first_lane_id < 32 && lane_id == first_lane_id){
-                atomicAdd(_grad_opa+i*1+0, grad_wrt_opa);
-            }
-
+            atomicAdd(_grad_opa+i*1+0, (float)(d_alpha*current_prob));
             float d_current_prob = d_alpha * _gaussian_opa[i];
             // grad w.r.t pos
-            float grad_wrt_pos[2];
-            grad_wrt_pos[0] = (float)(d_current_prob * dP_dx);
-            grad_wrt_pos[1] = (float)(d_current_prob * dP_dy);
-            #pragma unroll
-            for (int offset = 16; offset > 0; offset /= 2){
-                grad_wrt_pos[0] += __shfl_down_sync(active_mask, grad_wrt_pos[0], offset);
-                grad_wrt_pos[1] += __shfl_down_sync(active_mask, grad_wrt_pos[1], offset);
-            }
-            if(first_lane_id < 32 && lane_id == first_lane_id){
-                atomicAdd(_grad_pos+i*2+0, grad_wrt_pos[0]);
-                atomicAdd(_grad_pos+i*2+1, grad_wrt_pos[1]);
-            }
+            atomicAdd(_grad_pos+i*2+0, (float)(d_current_prob * dP_dx));
+            atomicAdd(_grad_pos+i*2+1, (float)(d_current_prob * dP_dy));
             // grad w.r.t cov
-            float grad_wrt_cov[4];
-            grad_wrt_cov[0] = (float)(d_current_prob * dP_da);
-            grad_wrt_cov[1] = (float)(d_current_prob * dP_db);
-            grad_wrt_cov[2] = (float)(d_current_prob * dP_dc);
-            grad_wrt_cov[3] = (float)(d_current_prob * dP_dd);
-            #pragma unroll
-            for (int offset = 16; offset > 0; offset /= 2){
-                grad_wrt_cov[0] += __shfl_down_sync(active_mask, grad_wrt_cov[0], offset);
-                grad_wrt_cov[1] += __shfl_down_sync(active_mask, grad_wrt_cov[1], offset);
-                grad_wrt_cov[2] += __shfl_down_sync(active_mask, grad_wrt_cov[2], offset);
-                grad_wrt_cov[3] += __shfl_down_sync(active_mask, grad_wrt_cov[3], offset);
-            }
-            if(first_lane_id < 32 && lane_id == first_lane_id){
-                atomicAdd(_grad_cov+i*4+0, grad_wrt_cov[0]);
-                atomicAdd(_grad_cov+i*4+1, grad_wrt_cov[1]);
-                atomicAdd(_grad_cov+i*4+2, grad_wrt_cov[2]);
-                atomicAdd(_grad_cov+i*4+3, grad_wrt_cov[3]);
-            }
+            atomicAdd(_grad_cov+i*4+0, (float)(d_current_prob * dP_da));
+            atomicAdd(_grad_cov+i*4+1, (float)(d_current_prob * dP_db));
+            atomicAdd(_grad_cov+i*4+2, (float)(d_current_prob * dP_dc));
+            atomicAdd(_grad_cov+i*4+3, (float)(d_current_prob * dP_dd));
 
             accum *= (1-alpha);
         }
@@ -845,18 +763,18 @@ __global__ void draw_kernel(
     // direction calculation
     float current_dir[3];
     float _norm = 0.0f;
+    #pragma unroll
+    for(uint32_t _i=0; _i<3; ++_i){
+        current_dir[_i] = lefttop_pos[_i] + id_x * vec_dx[_i] + id_y * vec_dy[_i] - rays_o[_i];
+        _norm += current_dir[_i] * current_dir[_i];
+    }
+    _norm = sqrtf(_norm);
+    #pragma unroll
+    for(uint32_t _i=0; _i<3;++_i){
+        current_dir[_i] = current_dir[_i] / (_norm + 1e-7);
+    }
     float SH[9];
     if(use_sh_coeff){
-        #pragma unroll
-        for(uint32_t _i=0; _i<3; ++_i){
-            current_dir[_i] = lefttop_pos[_i] + id_x * vec_dx[_i] + id_y * vec_dy[_i] - rays_o[_i];
-            _norm += current_dir[_i] * current_dir[_i];
-        }
-        _norm = sqrtf(_norm);
-        #pragma unroll
-        for(uint32_t _i=0; _i<3;++_i){
-            current_dir[_i] = current_dir[_i] / (_norm + 1e-7);
-        }
         calc_sh(9, current_dir, SH);
     }
 
@@ -906,7 +824,6 @@ __global__ void draw_kernel(
             if(global_idx>=(end_idx-start_idx)||accum < 0.0001){
                 break;
             }
-
             _a = _gaussian_cov[i*4+0];
             _b = _gaussian_cov[i*4+1];
             _c = _gaussian_cov[i*4+2];

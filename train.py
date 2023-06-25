@@ -211,15 +211,16 @@ class Trainer:
                 cv2.imwrite(f"{opt.exp}/imgs/train_{i_iter}.png", (img_npy*255).astype(np.uint8)[...,::-1])
                 self.save_checkpoint()
 
-            if i_iter % 100 == 0 and opt.debug:
+            if i_iter % 100 == 0:
                 Timer.show_recorder()
 
             if i_iter % (opt.n_iters_test) == 0:
                 test_psnrs = []
                 test_ssims = []
-                time_start = time.time()
+                elapsed = 0
                 for test_camera_id in self.test_split:
                     output = self.test(test_camera_id)
+                    elapsed += output["render_time"]
                     test_psnrs.append(output["psnr"])
                     test_ssims.append(output["ssim"])
                     # save imgs
@@ -227,17 +228,23 @@ class Trainer:
                     # os.makedirs(dirpath, exist_ok=True)
                     # img_npy = output["image"].clip(0,1).detach().cpu().numpy()
                     # cv2.imwrite(f"{opt.exp}/test_imgs/iter_{i_iter}_cid_{test_camera_id}.png", (img_npy*255).astype(np.uint8)[...,::-1])
-                time_end = time.time()
                 print(test_psnrs)
                 print(test_ssims)
                 print("TEST SPLIT PSNR: {:.4f}".format(np.mean(test_psnrs)))
                 print("TEST SPLIT SSIM: {:.4f}".format(np.mean(test_ssims)))
-                print("REDNDERING SPEED: {:.4f}".format(len(self.test_split)/(time_end - time_start)))
+                print("REDNDERING SPEED: {:.4f}".format(len(self.test_split)/elapsed))
 
     @torch.no_grad()
     def test(self, camera_id, extrinsics=None, intrinsics=None):
+        
+        tic = torch.cuda.Event(enable_timing=True)
+        toc = torch.cuda.Event(enable_timing=True)
+        tic.record()
         self.gaussian_splatter.eval()
         rendered_img = self.gaussian_splatter(camera_id, extrinsics, intrinsics)
+        toc.record()
+        torch.cuda.synchronize()
+        render_time = tic.elapsed_time(toc)/1000
         if camera_id is not None:
             psnr = psnr_func(rendered_img, self.gaussian_splatter.ground_truth).item()
             ssim = self.ssim_criterion(
@@ -250,6 +257,7 @@ class Trainer:
             output.update({
                 "psnr": psnr,
                 "ssim": ssim,
+                "render_time": render_time,
             })
         return output
     
