@@ -10,3 +10,4 @@ kornia
 viser
 trimesh
 omegaconf
+pykdtree
