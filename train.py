@@ -6,8 +6,9 @@ import torch
 import argparse
 from splatter import Splatter
 import cv2
-from torchgeometry.losses import SSIM
+# from torchgeometry.losses import SSIM
 from torchmetrics.functional import peak_signal_noise_ratio as psnr_func
+from torchmetrics import StructuralSimilarityIndexMeasure, PeakSignalNoiseRatio
 from utils import Timer
 # from gui import NeRFGUI
 from visergui import ViserViewer
@@ -66,7 +67,9 @@ class Trainer:
             self.test_split = np.arange(0, self.n_cameras, 8)
             self.train_split = np.array(list(set(np.arange(0, self.n_cameras, 1)) - set(self.test_split)))
 
-        self.ssim_criterion = SSIM(window_size=11, reduction='mean')
+        # self.ssim_criterion = SSIM(window_size=11, reduction='mean')
+        self.ssim_criterion = StructuralSimilarityIndexMeasure(data_range=1.0).to(gaussian_splatter.device)
+        self.psnr_metrics = PeakSignalNoiseRatio().to(gaussian_splatter.device)
         self.l1_losses = np.zeros(opt.n_history_track)
         self.psnrs = np.zeros(opt.n_history_track)
         self.ssim_losses = np.zeros(opt.n_history_track)
@@ -90,14 +93,17 @@ class Trainer:
 
         # loss
         l1_loss = ((rendered_img - self.gaussian_splatter.ground_truth).abs()).mean()
-        ssim_loss = self.ssim_criterion(
-            rendered_img.unsqueeze(0).permute(0, 3, 1, 2), 
-            self.gaussian_splatter.ground_truth.unsqueeze(0).permute(0, 3, 1, 2).to(rendered_img)
-        )
+        if opt.ssim_weight > 0:
+            ssim_loss = 1. - self.ssim_criterion(
+                rendered_img.unsqueeze(0).permute(0, 3, 1, 2), 
+                self.gaussian_splatter.ground_truth.unsqueeze(0).permute(0, 3, 1, 2).to(rendered_img)
+            )
+        else:
+            ssim_loss = torch.Tensor([0.0,]).to(l1_loss.device)
         loss = (1-opt.ssim_weight)*l1_loss + opt.ssim_weight*ssim_loss
         if opt.scale_reg > 0:
             loss += opt.scale_reg * self.gaussian_splatter.gaussian_3ds.scale.abs().mean()
-        psnr = psnr_func(rendered_img, self.gaussian_splatter.ground_truth)
+        psnr = self.psnr_metrics(rendered_img, self.gaussian_splatter.ground_truth)
 
         # optimize
         with Timer("backward", debug=opt.debug):
@@ -224,10 +230,10 @@ class Trainer:
                     test_psnrs.append(output["psnr"])
                     test_ssims.append(output["ssim"])
                     # save imgs
-                    # dirpath = f"{opt.exp}/test_imgs/"
-                    # os.makedirs(dirpath, exist_ok=True)
-                    # img_npy = output["image"].clip(0,1).detach().cpu().numpy()
-                    # cv2.imwrite(f"{opt.exp}/test_imgs/iter_{i_iter}_cid_{test_camera_id}.png", (img_npy*255).astype(np.uint8)[...,::-1])
+                    dirpath = f"{opt.exp}/test_imgs/"
+                    os.makedirs(dirpath, exist_ok=True)
+                    img_npy = output["image"].clip(0,1).detach().cpu().numpy()
+                    cv2.imwrite(f"{opt.exp}/test_imgs/iter_{i_iter}_cid_{test_camera_id}.png", (img_npy*255).astype(np.uint8)[...,::-1])
                 print(test_psnrs)
                 print(test_ssims)
                 print("TEST SPLIT PSNR: {:.4f}".format(np.mean(test_psnrs)))
@@ -246,7 +252,7 @@ class Trainer:
         torch.cuda.synchronize()
         render_time = tic.elapsed_time(toc)/1000
         if camera_id is not None:
-            psnr = psnr_func(rendered_img, self.gaussian_splatter.ground_truth).item()
+            psnr = self.psnr_metrics(rendered_img, self.gaussian_splatter.ground_truth).item()
             ssim = self.ssim_criterion(
                 rendered_img.unsqueeze(0).permute(0, 3, 1, 2), 
                 self.gaussian_splatter.ground_truth.unsqueeze(0).permute(0, 3, 1, 2).to(rendered_img),
@@ -300,7 +306,7 @@ if __name__ == "__main__":
     parser.add_argument("--delete_thresh", type=float, default=1.5)
     parser.add_argument("--n_opa_reset", type=int, default=10000000)
     parser.add_argument("--split_thresh", type=float, default=0.05)
-    parser.add_argument("--ssim_weight", type=float, default=0.2)
+    parser.add_argument("--ssim_weight", type=float, default=0.1)
     parser.add_argument("--debug", type=int, default=0)
     parser.add_argument("--use_sh_coeff", type=int, default=0)
     parser.add_argument("--scale_reg", type=float, default=0)
@@ -316,7 +322,7 @@ if __name__ == "__main__":
     # parser.add_argument("--grad_accum_iters", type=int, default=20)
     parser.add_argument("--grad_accum_iters", type=int, default=50)
     parser.add_argument("--grad_accum_method", type=str, default="max", choices=["mean", "max"])
-    parser.add_argument("--grad_thresh", type=float, default=0.0001)
+    parser.add_argument("--grad_thresh", type=float, default=0.0002)
     parser.add_argument("--use_clone", type=int, default=0)
     parser.add_argument("--use_split", type=int, default=1)
     parser.add_argument("--clone_dt", type=float, default=0.01)

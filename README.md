@@ -4,11 +4,12 @@ An unofficial Implementation of 3D Gaussian Splatting for Real-Time Radiance Fie
 We implement the 3d gaussian splatting methods through PyTorch with CUDA extensions, including the global culling, tile-based culling and rendering forward/backward codes.
 
 #### Update
-- 6/26/2023 Accelerate **Training** Speed from avg 4 it/s to 8.5 it/s, by replacing part of atomicAdd by warp reduction primitive, costing 14 minutes for training 7k iterations on Garden scene.
+- 6/26/2023 Fix bugs of SSIM criterion, PSNR is improved from 24.28 to 24.85 (Garden Scene)
+- 6/26/2023 Accelerate **Training** Speed from avg 4 it/s to 13 it/s, by (1) replacing part of atomicAdd by warp reduction primitive (2) fixing bugs for SSIM functions. The training costs 9 minutes for 7k iterations on Garden scene.
 
 | Scene | PSNR from paper | PSNR from this repo | Rendering Speed (official) | Rendering Speed (Ours) |
 | --- | --- | --- | --- | --- |
-| Garden | 25.82(5k) | 24.28 (7k) | 160 FPS (avg MIPNeRF360) | 60 FPS |
+| Garden | 25.82(5k) | 24.85 (7k) | 160 FPS (avg MIPNeRF360) | 60 FPS |
 
 
 
