@@ -211,7 +211,7 @@ class Trainer:
                 cv2.imwrite(f"{opt.exp}/imgs/train_{i_iter}.png", (img_npy*255).astype(np.uint8)[...,::-1])
                 self.save_checkpoint()
 
-            if i_iter % 100 == 0:
+            if i_iter % 100 == 0 and opt.debug:
                 Timer.show_recorder()
 
             if i_iter % (opt.n_iters_test) == 0:
@@ -265,10 +265,6 @@ class Trainer:
 
 
 if __name__ == "__main__":
-    # CUDA_VISIBLE_DEVICES=2 python train.py --scale_activation exp --lr 0.003 --opa_init_value 0.3 --n_iters_warmup 300 --lr_factor_for_opa 10 --n_adaptive_control 20000000
-    # PSNR/SSIM 23.17/0.2054
-    # python train.py --scale_activation abs --lr 0.003 --opa_init_value 0.3 --n_iters_warmup 300 --lr_factor_for_opa 10 --n_adaptive_control 200 --cudaculling 1 --tile_culling_prob_thresh 0.05 --fast_drawing 1 --exp abs_oiv3_acsplit_offdecay --use_clone 0 --use_split 1 --grad_accum_iter 20 --lr_decay exp
-    # PSNR/SSIM 24.0421/0.1637
     parser = argparse.ArgumentParser()
     parser.add_argument("--n_iters", type=int, default=7001)
     parser.add_argument("--n_iters_warmup", type=int, default=300)
@@ -278,7 +274,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_adaptive_control", type=int, default=100)
     parser.add_argument("--render_downsample", type=int, default=4)
     parser.add_argument("--jacobian_track", type=int, default=0)
-    parser.add_argument("--data", type=str, default="garden")
+    parser.add_argument("--data", type=str, default="colmap_garden/")
     parser.add_argument("--scale_init_value", type=float, default=1)
     parser.add_argument("--opa_init_value", type=float, default=0.3)
     parser.add_argument("--tile_culling_dist_thresh", type=float, default=0.5)
@@ -297,7 +293,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_opa_reset", type=int, default=10000000)
     parser.add_argument("--split_thresh", type=float, default=0.05)
     parser.add_argument("--ssim_weight", type=float, default=0.2)
-    parser.add_argument("--debug", type=int, default=1)
+    parser.add_argument("--debug", type=int, default=0)
     parser.add_argument("--use_sh_coeff", type=int, default=0)
     parser.add_argument("--scale_reg", type=float, default=0)
     parser.add_argument("--cudaculling", type=int, default=1)
@@ -338,12 +334,8 @@ if __name__ == "__main__":
         jacobian_calc="torch"
     else:
         jacobian_calc="cuda"
-    if opt.data == "garden":
-        data_path = os.path.join("colmap_garden/sparse/0/")
-        img_path = f"colmap_garden/images_{opt.render_downsample}/"
-    elif opt.data == "fern":
-        data_path = os.path.join("llff/colmap/sparse/0/") 
-        img_path = f"llff/images_{opt.render_downsample}/"
+    data_path = os.path.join(opt.data, 'sparse', '0')
+    img_path = os.path.join(opt.data, f'images_{opt.render_downsample}')
 
     if opt.ckpt == "":
         opt.ckpt = None

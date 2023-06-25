@@ -133,9 +133,9 @@ class Gaussian3ds(nn.Module):
         # densification
         # 1. delete gaussians with small opacities
         assert self.init_values # only for the initial gaussians
-        print(inverse_sigmoid(0.01))
-        print(self.opa.min())
-        print(self.opa.max())
+        # print(inverse_sigmoid(0.01))
+        # print(self.opa.min())
+        # print(self.opa.max())
         if scale_activation == "abs":
             _mask = (self.opa > inverse_sigmoid(0.01)) & (self.scale.norm(dim=-1) < delete_thresh)
         elif scale_activation == "exp":
@@ -475,20 +475,18 @@ class Splatter(nn.Module):
             )
             self.tile_info_cpp = self.tile_info.create_tiles()
         else:
-            with Timer("    set image"):
+            with Timer("    set image", debug=self.debug):
                 self.current_w2c_quat = self.w2c_quats[idx]
                 self.current_w2c_tran = self.w2c_trans[idx]
                 self.current_w2c_rot = self.w2c_rots[idx]
                 self.ground_truth = self.imgs[idx].to(torch.float16)/255.
-            with Timer("    set camera"):
+            with Timer("    set camera", debug=self.debug):
                 if self.cameras[self.cam_ids[idx]] != self.current_camera:
                     self.current_camera = self.cameras[self.cam_ids[idx]]
                     width = self.current_camera.width / self.render_downsample
                     height = self.current_camera.height / self.render_downsample
                     focal_x = self.current_camera.params[0] / self.render_downsample
                     focal_y = self.current_camera.params[1] / self.render_downsample
-                    print(focal_x)
-                    print(focal_y)
                     self.tile_info = Tiles(int(self.ground_truth.shape[1]), int(self.ground_truth.shape[0]), focal_x, focal_y, self.device)
                     self.tile_info_cpp = self.tile_info.create_tiles()
 
@@ -506,7 +504,7 @@ class Splatter(nn.Module):
         # print(f"number of gaussians {len(self.gaussian_3ds.pos)}")
         # self.tic.record()
         if self.cudaculling:
-            with Timer(" frustum cuda"):
+            with Timer(" frustum cuda", debug=self.debug):
                 normed_quat = (self.gaussian_3ds.quat/self.gaussian_3ds.quat.norm(dim=1, keepdim=True))
                 if self.scale_activation == "abs":
                     normed_scale = self.gaussian_3ds.scale.abs()+1e-4
@@ -632,7 +630,7 @@ class Splatter(nn.Module):
 
     def forward(self, camera_id=None, extrinsics=None, intrinsics=None):
         with Timer("forward", debug=self.debug):
-            with Timer("set camera"):
+            with Timer("set camera", debug=self.debug):
                 self.set_camera(camera_id, extrinsics, intrinsics)
             with Timer("frustum culling", debug=self.debug):
                 self.project_and_culling()
@@ -642,7 +640,6 @@ class Splatter(nn.Module):
                 padded_render_img = torch.clamp(padded_render_img, 0, 1)
                 ret = self.tile_info.crop(padded_render_img)
         
-        Timer.show_recorder()
         return ret
 
 if __name__ == "__main__":
