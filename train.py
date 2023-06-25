@@ -261,7 +261,7 @@ class Trainer:
             "quat": self.gaussian_splatter.gaussian_3ds.quat,
             "scale": self.gaussian_splatter.gaussian_3ds.scale,
         }
-        torch.save(ckpt, "ckpt.pth")
+        torch.save(ckpt, os.path.join(opt.exp, "ckpt.pth"))
 
 
 if __name__ == "__main__":

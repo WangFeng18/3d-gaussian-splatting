@@ -95,6 +95,7 @@ class Gaussian3ds(nn.Module):
                 cov=self.cov[mask],
             )
     
+    # Deprecated, now fused to CUDA kernel in gaussian.global culling
     def get_gaussian_3d_cov(self, scale_activation="abs"):
         R = q2r(self.quat)
         if scale_activation == "abs":
@@ -225,6 +226,7 @@ class Gaussian3ds(nn.Module):
             self.quat = nn.parameter.Parameter(torch.cat(cat_quat))
             self.scale = nn.parameter.Parameter(torch.cat(cat_scale))
     
+    # Deprecated, now fused to CUDA kernel in gaussian.global culling
     def project(self, rot, tran, near, jacobian_calc, scale_activation="abs"):
 
         pos_cam_space = world_to_camera(self.pos, rot, tran)
