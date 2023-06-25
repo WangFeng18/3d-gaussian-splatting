@@ -223,10 +223,10 @@ class Trainer:
                     test_psnrs.append(output["psnr"])
                     test_ssims.append(output["ssim"])
                     # save imgs
-                    dirpath = f"{opt.exp}/test_imgs/"
-                    os.makedirs(dirpath, exist_ok=True)
-                    img_npy = output["image"].clip(0,1).detach().cpu().numpy()
-                    cv2.imwrite(f"{opt.exp}/test_imgs/iter_{i_iter}_cid_{test_camera_id}.png", (img_npy*255).astype(np.uint8)[...,::-1])
+                    # dirpath = f"{opt.exp}/test_imgs/"
+                    # os.makedirs(dirpath, exist_ok=True)
+                    # img_npy = output["image"].clip(0,1).detach().cpu().numpy()
+                    # cv2.imwrite(f"{opt.exp}/test_imgs/iter_{i_iter}_cid_{test_camera_id}.png", (img_npy*255).astype(np.uint8)[...,::-1])
                 time_end = time.time()
                 print(test_psnrs)
                 print(test_ssims)
