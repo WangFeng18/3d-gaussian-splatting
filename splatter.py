@@ -451,7 +451,15 @@ class Splatter(nn.Module):
             # print(self.w2c_trans)
             # print(self.w2c_rots)
             self.cam_ids.append(img_info.camera_id)
-
+        
+    def switch_resolution(self, downsample_factor):
+        if downsample_factor == self.render_downsample:
+            return
+        self.image_path = self.image_path.replace(f"images_{self.render_downsample}", f"images_{downsample_factor}")
+        self.render_downsample = downsample_factor
+        self.parse_imgs()
+        self.current_camera = None
+        self.set_camera(0)
         # print(torch.stack(self.w2c_trans, dim=0).mean(0))
         # print(torch.stack(self.w2c_rots, dim=0).mean(0))
 

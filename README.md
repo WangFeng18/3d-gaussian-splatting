@@ -31,6 +31,9 @@ Put the colmap output in this folder, e.g., colmap_garden/sparse/0/, as well as 
 ### Traning
 ```
 python train.py # for 7k
+python train.py --exp garden_sh --grad_thresh 0.000004 --debug 1 --ssim_weight 0.1 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 --split_thresh 0.08 # PSNR 24.75 SSIM 71.95 FPS 70 N_Gaussians 376467
+python train.py --exp garden_sh --grad_thresh 0.000004 --debug 1 --ssim_weight 0.1 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 # PSNR 25.03 SSIM 0.7541 FPS 40 N_GAUSSIANS 933918 
+CUDA_VISIBLE_DEVICES=3 python train.py --exp garden --grad_thresh 0.000002 --debug 1 --ssim_weight 0.1 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 --split_thresh 0.08 # PSNR 24.91 SSIM 73.18 FPS 64 N_GAUSSIANS 506627 GOOD
 ```
 
 ### Rendering With a GUI

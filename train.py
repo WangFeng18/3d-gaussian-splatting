@@ -220,6 +220,9 @@ class Trainer:
             if i_iter % 100 == 0:
                 Timer.show_recorder()
 
+            if i_iter == 400:
+                gaussian_splatter.switch_resolution(opt.render_downsample)
+
             if i_iter % (opt.n_iters_test) == 0:
                 test_psnrs = []
                 test_ssims = []
@@ -279,6 +282,7 @@ class Trainer:
 
 
 if __name__ == "__main__":
+    # CUDA_VISIBLE_DEVICES=3 python train.py --exp garden_sh --grad_thresh 0.000004 --debug 1 --ssim_weight 0.1 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 // 25
     parser = argparse.ArgumentParser()
     parser.add_argument("--n_iters", type=int, default=7001)
     parser.add_argument("--n_iters_warmup", type=int, default=300)
@@ -286,6 +290,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_history_track", type=int, default=100)
     parser.add_argument("--n_save_train_img", type=int, default=100)
     parser.add_argument("--n_adaptive_control", type=int, default=100)
+    parser.add_argument("--render_downsample_start", type=int, default=4)
     parser.add_argument("--render_downsample", type=int, default=4)
     parser.add_argument("--jacobian_track", type=int, default=0)
     parser.add_argument("--data", type=str, default="colmap_garden/")
@@ -349,7 +354,7 @@ if __name__ == "__main__":
     else:
         jacobian_calc="cuda"
     data_path = os.path.join(opt.data, 'sparse', '0')
-    img_path = os.path.join(opt.data, f'images_{opt.render_downsample}')
+    img_path = os.path.join(opt.data, f'images_{opt.render_downsample_start}')
 
     if opt.ckpt == "":
         opt.ckpt = None
