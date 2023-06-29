@@ -16,6 +16,7 @@ from renderer import draw, trunc_exp, global_culling, world2camera_func
 from tqdm import tqdm
 import argparse
 from pykdtree.kdtree import KDTree
+EPS=1e-4
     
 def world_to_camera(points, rot, tran):
     # r = torch.empty_like(points)
@@ -99,7 +100,7 @@ class Gaussian3ds(nn.Module):
     def get_gaussian_3d_cov(self, scale_activation="abs"):
         R = q2r(self.quat)
         if scale_activation == "abs":
-            _scale = self.scale.abs()+1e-4
+            _scale = self.scale.abs()+EPS
         elif scale_activation == "exp":
             _scale = trunc_exp(self.scale)
         else:
@@ -116,7 +117,7 @@ class Gaussian3ds(nn.Module):
         # return self.cov + 1e-2*torch.eye(2).unsqueeze(dim=0).to(self.cov)
     
     def reset_opa(self):
-        torch.nn.init.uniform_(self.opa, a=inverse_sigmoid(0.1), b=inverse_sigmoid(0.11))
+        torch.nn.init.uniform_(self.opa, a=inverse_sigmoid(0.01), b=inverse_sigmoid(0.01))
     
     def adaptive_control(
         self, 
@@ -138,9 +139,9 @@ class Gaussian3ds(nn.Module):
         # print(self.opa.min())
         # print(self.opa.max())
         if scale_activation == "abs":
-            _mask = (self.opa > inverse_sigmoid(0.01)) & (self.scale.norm(dim=-1) < delete_thresh)
+            _mask = (self.opa > inverse_sigmoid(0.02)) & (self.scale.norm(dim=-1) < delete_thresh) #& (self.scale.abs().max(dim=-1)[0] > 5e-4)
         elif scale_activation == "exp":
-            _mask = (self.opa > inverse_sigmoid(0.01)) & (self.scale.exp().norm(dim=-1) < delete_thresh)
+            _mask = (self.opa > inverse_sigmoid(0.02)) & (self.scale.exp().norm(dim=-1) < delete_thresh) #& (self.scale.exp().max(dim=-1)[0] > 1e-4)
         else:
             print("Wrong activation")
             exit()
@@ -517,7 +518,7 @@ class Splatter(nn.Module):
             with Timer(" frustum cuda", debug=self.debug):
                 normed_quat = (self.gaussian_3ds.quat/self.gaussian_3ds.quat.norm(dim=1, keepdim=True))
                 if self.scale_activation == "abs":
-                    normed_scale = self.gaussian_3ds.scale.abs()+1e-4
+                    normed_scale = self.gaussian_3ds.scale.abs()+EPS
                 else:
                     assert self.scale_activation == "exp"
                     normed_scale = trunc_exp(self.gaussian_3ds.scale)
@@ -538,6 +539,7 @@ class Splatter(nn.Module):
                     rgb=self.gaussian_3ds.rgb[_culling_mask.bool()] if self.use_sh_coeff else self.gaussian_3ds.rgb[_culling_mask.bool()].sigmoid(),
                     opa=self.gaussian_3ds.opa[_culling_mask.bool()].sigmoid(),
                 )
+                self.culling_mask = _culling_mask
         else:
             with Timer("culling 1"):
                 gaussian_3ds_pos_camera_space = world_to_camera(self.gaussian_3ds.pos, self.current_w2c_rot, self.current_w2c_tran)

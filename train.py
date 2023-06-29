@@ -28,7 +28,8 @@ class Trainer:
         if self.opt.lr_decay == "official":
             _gamma = (0.01)**(1/(self.opt.n_iters-warmup_iters))
             self.lr_lambdas = [
-                lambda i_iter: i_iter / warmup_iters if i_iter <= warmup_iters else 1,
+                # lambda i_iter: i_iter / warmup_iters if i_iter <= warmup_iters else 1,
+                lambda i_iter: i_iter / warmup_iters if i_iter <= warmup_iters else _gamma**(i_iter-warmup_iters),
                 lambda i_iter: i_iter / warmup_iters if i_iter <= warmup_iters else 1,
                 lambda i_iter: i_iter / warmup_iters if i_iter <= warmup_iters else _gamma**(i_iter-warmup_iters),
                 lambda i_iter: i_iter / warmup_iters if i_iter <= warmup_iters else 1,
@@ -83,7 +84,10 @@ class Trainer:
     
     def train_step(self, i_iter, bar):
         opt = self.opt
-        _adaptive_control = i_iter > 600 and i_iter % opt.n_adaptive_control == 0
+        _reset_opa = i_iter % (opt.n_opa_reset) == 0 and i_iter > 0
+        _in_reset_interval = (i_iter >= opt.n_opa_reset) and (i_iter % opt.n_opa_reset < opt.reset_interval)
+        _adaptive_control_only_delete = (i_iter > 600 and i_iter % opt.n_adaptive_control == 0)
+        _adaptive_control = (i_iter > 600 and i_iter < opt.adaptive_control_end_iter and i_iter % opt.n_adaptive_control == 0)
         _adaptive_control_accum_start = i_iter > 600 and (i_iter + opt.grad_accum_iters - 1) % opt.n_adaptive_control == 0
         self.optimizer.zero_grad()
 
@@ -103,6 +107,10 @@ class Trainer:
         loss = (1-opt.ssim_weight)*l1_loss + opt.ssim_weight*ssim_loss
         if opt.scale_reg > 0:
             loss += opt.scale_reg * self.gaussian_splatter.gaussian_3ds.scale.abs().mean()
+        if opt.opa_reg > 0:
+            opa_sigmoid = self.gaussian_splatter.gaussian_3ds.opa.sigmoid()
+            loss += opt.opa_reg * (opa_sigmoid * (1-opa_sigmoid)).mean()
+
         psnr = self.psnr_metrics(rendered_img, self.gaussian_splatter.ground_truth)
 
         # optimize
@@ -139,25 +147,25 @@ class Trainer:
         # self.accum_max_grad = torch.max(self.gaussian_splatter.gaussian_3ds.pos.grad, self.accum_max_grad)
         if opt.grad_accum_method == "mean":
             self.accum_max_grad += self.gaussian_splatter.gaussian_3ds.pos.grad.abs()
-            self.grad_counter += 1
+            self.grad_counter += self.gaussian_splatter.culling_mask.to(torch.float32)
         else:
             assert opt.grad_accum_method == "max"
             self.accum_max_grad = torch.max(self.gaussian_splatter.gaussian_3ds.pos.grad.abs(), self.accum_max_grad)
             self.grad_counter = 1
 
-        if _adaptive_control:
+        if _adaptive_control or _adaptive_control_only_delete:
             # adaptive control for gaussians
             # grad = self.gaussian_splatter.gaussian_3ds.pos.grad
             # adaptive_number = (self.accum_max_grad.abs().max(-1)[0] > 0.0002).sum()
             # adaptive_ratio = adaptive_number / grad[..., 0].numel()
             self.gaussian_splatter.gaussian_3ds.adaptive_control(
-                self.accum_max_grad/self.grad_counter, 
+                self.accum_max_grad/(self.grad_counter+1e-3).unsqueeze(dim=-1), 
                 taus=opt.split_thresh, 
                 delete_thresh=opt.delete_thresh, 
                 scale_activation=gaussian_splatter.scale_activation,
                 grad_thresh=opt.grad_thresh,
-                use_clone=opt.use_clone,     
-                use_split=opt.use_split,
+                use_clone=opt.use_clone if (_adaptive_control and (not _in_reset_interval)) else False, 
+                use_split=opt.use_split if (_adaptive_control and (not _in_reset_interval)) else False,
                 grad_aggregation=opt.grad_aggregation,
                 clone_dt=opt.clone_dt,
             )
@@ -175,6 +183,8 @@ class Trainer:
 
         for i_opt, (param_group, lr) in enumerate(zip(self.optimizer.param_groups, self.lrs)):
             param_group['lr'] = self.lr_lambdas[i_opt](i_iter) * lr
+            # if _in_reset_interval and i_opt == 0:
+                # param_group["lr"] = lr
         
         if i_iter % (opt.n_opa_reset) == 0 and i_iter > 0:
             self.gaussian_splatter.gaussian_3ds.reset_opa()
@@ -310,11 +320,13 @@ if __name__ == "__main__":
 
     parser.add_argument("--delete_thresh", type=float, default=1.5)
     parser.add_argument("--n_opa_reset", type=int, default=10000000)
+    parser.add_argument("--reset_interval", type=int, default=500)
     parser.add_argument("--split_thresh", type=float, default=0.05)
     parser.add_argument("--ssim_weight", type=float, default=0.1)
     parser.add_argument("--debug", type=int, default=0)
     parser.add_argument("--use_sh_coeff", type=int, default=0)
     parser.add_argument("--scale_reg", type=float, default=0)
+    parser.add_argument("--opa_reg", type=float, default=0)
     parser.add_argument("--cudaculling", type=int, default=1)
     parser.add_argument("--adaptive_lr", type=int, default=0)
     parser.add_argument("--seed", type=int, default=2023)
@@ -332,6 +344,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_split", type=int, default=1)
     parser.add_argument("--clone_dt", type=float, default=0.01)
     parser.add_argument("--grad_aggregation", type=str, default="max", choices=["max", "mean"])
+    parser.add_argument("--adaptive_control_end_iter", type=int, default=1000000000)
 
     # GUI related
     parser.add_argument("--gui", default=0, type=int)

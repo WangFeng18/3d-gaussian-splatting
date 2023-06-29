@@ -11,6 +11,7 @@ Work in progress.
 | Scene | PSNR from paper | PSNR from this repo | Rendering Speed (official) | Rendering Speed (Ours) |
 | --- | --- | --- | --- | --- |
 | Garden | 25.82(5k) | 24.91 (7k) | 160 FPS (avg MIPNeRF360) | 60 FPS |
+| Garden | 25.82(5k) | 25.70 (7k) | 160 FPS (avg MIPNeRF360) | 25 FPS |
 
 
 
@@ -33,6 +34,19 @@ Put the colmap output in this folder, e.g., colmap_garden/sparse/0/, as well as 
 python train.py --exp garden --grad_thresh 0.000004 --debug 1 --ssim_weight 0.1 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 --split_thresh 0.08 # PSNR 24.75 SSIM 71.95 FPS 70 N_Gaussians 376467
 python train.py --exp garden --grad_thresh 0.000004 --debug 1 --ssim_weight 0.1 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 # PSNR 25.03 SSIM 0.7541 FPS 40 N_GAUSSIANS 933918 
 python train.py --exp garden --grad_thresh 0.000002 --debug 1 --ssim_weight 0.1 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 --split_thresh 0.08 # PSNR 24.91 SSIM 73.18 FPS 64 N_GAUSSIANS 506627 GOOD
+
+python train.py --exp garden2 --grad_thresh 0.000004 --debug 1 --ssim_weight 0.2 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 --adaptive_control_end_iter 3000 --opa_init_value 0.05 --lr_factor_for_opa 20 # PSNR 25.55 SSIM 79.83 N_GAUSSIANS 2418528 FPS 24.68
+
+CUDA_VISIBLE_DEVICES=3 python train.py --exp garden2 --grad_thresh 0.000004 --debug 1 --ssim_weight 0.2 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 --adaptive_control_end_iter 3000 --opa_init_value 0.05 --lr_factor_for_opa 20 # PSNR 25.5586 SSIM 80.10 FPS 25.30 N_GAUSSIANS 2401413
+
+python train.py --exp garden2 --grad_thresh 0.000004 --debug 1 --ssim_weight 0.2 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 --adaptive_control_end_iter 3000 --opa_init_value 0.05 --lr_factor_for_opa 20 --lr_factor_for_scale 0.2 --lr_factor_for_quat 10 --split_thresh 0.05 #PSNR 24.896 SSIM 76.55 FPS 65 N_GAUSSIANS 765932
+
+python train.py --exp garden2 --grad_thresh 0.000004 --debug 1 --ssim_weight 0.2 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 --adaptive_control_end_iter 3000 --opa_init_value 0.05 --lr_factor_for_opa 20 --lr_factor_for_quat 10 # PSNR 25.6906 SSIM 80.66 FPS 24.68
+
+python train.py --exp garden2 --grad_thresh 0.000004 --debug 1 --ssim_weight 0.2 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 --adaptive_control_end_iter 3000 --opa_init_value 0.05 --lr_factor_for_opa 20 --lr_factor_for_scale 0.5 --lr_factor_for_quat 10 --split_thresh 0.05 # PSNR 25.3769 SSIM 0.7902 FPS 41.3186
+
+CUDA_VISIBLE_DEVICES=3 python train.py --exp garden2 --grad_thresh 0.000004 --debug 1 --ssim_weight 0.2 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 --adaptive_control_end_iter 3000 --opa_init_value 0.05 --lr_factor_for_opa 20 --lr_factor_for_quat 20 # PSNR 25.7021 SSIM 0.8052 FPS 25.3567
+
 ```
 
 ### Rendering With a GUI

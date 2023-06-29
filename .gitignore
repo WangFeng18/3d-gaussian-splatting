@@ -12,3 +12,4 @@ colmap_garden
 *.pt
 *.mp4
 src/gaussian_nosh.cu
+RES.md
