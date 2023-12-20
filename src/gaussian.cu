@@ -1191,7 +1191,7 @@ __global__ void global_culling_kernel(
     const float half_height,
     float* res_pos,
     float* res_cov,
-    long* culling_mask
+    int64_t* culling_mask
     // int* res_size
 ){
     uint32_t pid = blockDim.x * blockIdx.x + threadIdx.x;
@@ -1364,7 +1364,7 @@ void global_culling(
         half_height,
         res_pos.data_ptr<float>(),
         res_cov.data_ptr<float>(),
-        culling_mask.data_ptr<long>()
+        culling_mask.data_ptr<int64_t>()
     );
 }
 
@@ -1377,7 +1377,7 @@ __global__ void global_culling_backward_kernel(
     const uint32_t n_point,
     const float* gradout_pos,
     const float* gradout_cov,
-    const long* culling_mask,
+    const int64_t* culling_mask,
     float* gradinput_pos,
     float* gradinput_quat,
     float* gradinput_scale
@@ -1601,7 +1601,7 @@ void global_culling_backward(
         n_point,
         gradout_pos.data_ptr<float>(),
         gradout_cov.data_ptr<float>(),
-        culling_mask.data_ptr<long>(),
+        culling_mask.data_ptr<int64_t>(),
         gradinput_pos.data_ptr<float>(),
         gradinput_quat.data_ptr<float>(),
         gradinput_scale.data_ptr<float>()
