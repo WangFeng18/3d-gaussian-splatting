@@ -29,7 +29,7 @@ pip install -e ./
 #### Data Preparation
 Put the colmap output in this folder, e.g., colmap_garden/sparse/0/, as well as the images.
 
-### Traning
+### Training
 ```
 python train.py --exp garden --grad_thresh 0.000004 --debug 1 --ssim_weight 0.1 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 --split_thresh 0.08 # PSNR 24.75 SSIM 71.95 FPS 70 N_Gaussians 376467
 python train.py --exp garden --grad_thresh 0.000004 --debug 1 --ssim_weight 0.1 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 # PSNR 25.03 SSIM 0.7541 FPS 40 N_GAUSSIANS 933918 
@@ -62,3 +62,46 @@ The transforms folder are from [Viser](https://github.com/nerfstudio-project/vis
 ### Link
 Another good implementation for 3D gaussian splatting, by [Zilong Chen](https://github.com/heheyas/gaussian_splatting_3d)
 
+
+### TODO List
+[ ] Save optimization parameters and training metadata to text file for debugging
+[ ] Move argument parser / options out of train.py
+[ ] See if adaptive control can be controlled by change in filtered change in loss
+[ ] Why does the number of gaussians scale with n_iters even on the same iteration? Seems like there are too many gaussians being generated leading to memory leaks etc. Most have low opacity?  I think issue is present in the base repository and isn't caused by my edits. 
+[ ] Investigate / tune cloned gaussians
+[ ] Investigate spherical harmonics and if they are incrementally added to the optimization
+[ ] Are the gaussians radix sorted as described in the paper? 
+
+
+### Configs
+
+Current Best:
+```
+rm -rf default_experiment/ &&  python train.py --data ~/Downloads/garden --use_clone 0 --grad_thresh 0.000004 --debug 0 --ssim_weight 0.2 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 --adaptive_control_end_iter 3000 --opa_init_value 0.05 --lr_factor_for_opa 20 --lr_factor_for_quat 20
+
+N_GAUSSIAN: 2,164,080
+PSNR: 25.16
+~500s
+```
+
+
+Fast and still pretty good:
+```
+rm -rf default_experiment/ &&  python train.py --data ~/Downloads/garden --use_clone 0 --grad_thresh 0.00002 --debug 0 --ssim_weight 0.2 --lr 0.002 --use_sh_coeff 0 --grad_accum_method mean --grad_accum_iters 300 --adaptive_control_end_iter 3000 --opa_init_value 0.05 --lr_factor_for_opa 20 --lr_factor_for_quat 20 --tile_culling_method prob2 --tile_culling_prob_thresh 0.15
+
+N_GAUSSIANS: 587081
+PSNR: 24.69
+~200s 
+```
+
+
+Prob2 method is much faster since it does not need to recompute the 2d splat size for each tile
+prob1: 
+PSNR: 24.6573
+Total Elapsed Time: 480.8974640369415
+N_GAUSSIANS: 585076
+
+prob2:
+PSNR: 24.6649
+Total Elapsed Time: 201.89806175231934
+N_GAUSSIANS: 584628

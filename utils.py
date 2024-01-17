@@ -341,7 +341,8 @@ def jacobian_torch(a):
     ]
     return torch.stack(_res, dim=-1).reshape(-1, 3, 3)
 
-
+# RGB_SIZE torch.Size([N, 3])
+# SH_SIZE torch.Size([N, 3, 9])
 def initialize_sh(rgbs):
     sh_coeff = torch.zeros(rgbs.shape[0], 3, 9, device=rgbs.device, dtype=rgbs.dtype)
     sh_coeff[:, :, 0] = rgbs / 0.28209479177387814
@@ -386,7 +387,8 @@ class Timer:
 
     @staticmethod
     def show_recorder():
-        pprint({k: np.mean(v) for k, v in Timer.recorder.items()})
+        if len(Timer.recorder.items()) > 0:
+            pprint({k: np.mean(v) for k, v in Timer.recorder.items()})
 
 def sample_two_point(gaussian_pos, gaussian_cov):
     # gaussian_cov: (..., 3, 3)
