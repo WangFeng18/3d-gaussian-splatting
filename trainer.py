@@ -1,4 +1,5 @@
 import os
+import numpy as np 
 import torch
 from tqdm import tqdm
 import cv2
@@ -156,7 +157,7 @@ class Trainer:
                 self.accum_max_grad/(self.grad_counter+1e-3).unsqueeze(dim=-1),   
                 taus=opt.split_thresh, 
                 delete_thresh=opt.delete_thresh, 
-                scale_activation=gaussian_splatter.scale_activation,
+                scale_activation=self.gaussian_splatter.scale_activation,
                 grad_thresh=opt.grad_thresh,
                 use_clone=opt.use_clone if (_adaptive_control) else False, 
                 use_split=opt.use_split if (_adaptive_control) else False,
@@ -200,6 +201,7 @@ class Trainer:
             "n_gaussians": [],
         }
 
+        opt =self.opt
         bar = tqdm(range(0, opt.n_iters))
         for i_iter in bar:
             output = self.train_step(i_iter)
@@ -229,10 +231,10 @@ class Trainer:
 
             # why render a downsample at 400 iterations? Maybe this is just a "unit test" 
             if i_iter == 400:
-                gaussian_splatter.switch_resolution(opt.render_downsample)
+                self.gaussian_splatter.switch_resolution(opt.render_downsample)
 
-            if i_iter == 4000 and not gaussian_splatter.use_sh_coeff:
-                gaussian_splatter.add_sh_coeff()
+            if i_iter == 4000 and not self.gaussian_splatter.use_sh_coeff:
+                self.gaussian_splatter.add_sh_coeff()
 
             if i_iter % (opt.n_iters_test) == 0:
                 test_psnrs = []
@@ -288,5 +290,5 @@ class Trainer:
             "quat": self.gaussian_splatter.gaussian_3ds.quat,
             "scale": self.gaussian_splatter.gaussian_3ds.scale,
         }
-        torch.save(ckpt, os.path.join(opt.experiment, "ckpt.pth"))
+        torch.save(ckpt, os.path.join(self.opt.experiment, "ckpt.pth"))
 
